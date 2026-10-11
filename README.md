@@ -9,6 +9,18 @@ From my Bsides Cymru 2023 talk: **[Needles Without the Thread](https://pretalx.c
 > Within the last 2 years, tools such as Sysmon have added new detections and events for process injection along with big improvements in detections within commercial EDR space.
 > With this in mind, a new method of injection was researched that would not fall foul to the traditional methods that are often detected today.
 
+# Usage
+
+```powershell
+# inject calc-loader-shellcode into Chrome's kernelbase.dll!CreateEventW
+.\ThreadlessInject.exe -p (Get-Process "Chrome").id -d kernelbase.dll -e CreateEventW
+```
+
+```powershell
+# inject ret-0-shellcode into Notepads's kernelbase.dll!MapViewOfFileEx
+.\ThreadlessInject.exe -p (Get-Process "Notepad").id -d kernelbase.dll -e MapViewOfFileEx -x "SDHAww=="
+```
+
 ## Possible Improvements
 
 - [x] Use more covert allocation and write primitives.
