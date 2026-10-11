@@ -63,6 +63,8 @@ internal static class Program
         // 
         // This shellcode loader stub assumes that the injector has left the hooked function RWX to enable restoration,
         // the injector can then monitor for when the restoration has occured to restore the memory back to RX
+        //
+        // The movabs,mov are used to restore the original 8 bytes of the hooked function
 
         /*
           start:
