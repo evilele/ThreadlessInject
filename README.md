@@ -21,6 +21,18 @@ From my Bsides Cymru 2023 talk: **[Needles Without the Thread](https://pretalx.c
 .\ThreadlessInject.exe -p (Get-Process "Notepad").id -d kernelbase.dll -e MapViewOfFileEx -x "SDHAww=="
 ```
 
+# Debugging
+* Increase the injectors timeout to 60min in Main()
+* Execute the target (e.g. Notepad) and attach a debugger
+* Set a breakpoint on the target function (e.g. `bp kernelbase!MapViewOfFileEx`)
+* Print the start of the function with `u kernelbase!MapViewOfFileEx L1`
+* Execute the injector `.\ThreadlessInject.exe -p (Get-Process "Notepad").id -d kernelbase.dll -e MapViewOfFileEx`
+* Continue the debugged process, let the breakpoint hit (e.g. press save in Notepad), and note the new call instruction at the start of the function
+* Set a second breakpoint in the code cave (where the loader shellcode is injected e.g. `bp 00007ffcfb520000`)
+* Continue again and you should hit the loader shellcode
+* Print the mem protection with `!vprot 00007ffcfb520000`
+* Continue again and calc should pop up
+
 ## Possible Improvements
 
 - [x] Use more covert allocation and write primitives.

