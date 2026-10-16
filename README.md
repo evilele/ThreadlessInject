@@ -25,7 +25,7 @@ From my Bsides Cymru 2023 talk: **[Needles Without the Thread](https://pretalx.c
 
 - [x] Use more covert allocation and write primitives.
 - [ ] Use patchless hooking via debugger attachment and hardware breakpoints [(https://www.pentestpartners.com/security-blog/patchless-amsi-bypass-using-sharpblock)](https://www.pentestpartners.com/security-blog/patchless-amsi-bypass-using-sharpblock/).
-- [ ] Avoid RWX on hooked function.  Hook assembly will need to handle VirtualProtect calls.
+- [x] Avoid RWX on hooked function.  Hook assembly will need to handle VirtualProtect calls.
 - [ ] Support any DLL via remote module enumeration.
 
 ### Debugging Plan for RWX Avoidance
@@ -33,7 +33,7 @@ From my Bsides Cymru 2023 talk: **[Needles Without the Thread](https://pretalx.c
 * Increase the injectors timeout to 60min in Main()
 * Execute the target (e.g. Notepad) and attach a debugger
 * Set a breakpoint on the target function (e.g. `bp kernelbase!MapViewOfFileEx`)
-* Print the start of the original (unhooked) function with `u kernelbase!MapViewOfFileEx L1`
+* Print the start of the original (unhooked) function with `u kernelbase!MapViewOfFileEx L3`
 * Print the mem protection with `!vprot kernelbase!MapViewOfFileEx`, should be RX
 * Execute the injector `.\ThreadlessInject.exe -p (Get-Process "Notepad").id -d kernelbase.dll -e MapViewOfFileEx`
 * Print the mem protection again with `!vprot kernelbase!MapViewOfFileEx`, should be RWX
@@ -65,7 +65,7 @@ add rsp, 30h          ; Clean up stack
 #### Check the new flow
 * Execute the target (e.g. Notepad) and attach a debugger
 * Set a breakpoint on the target function (e.g. `bp kernelbase!MapViewOfFileEx`)
-* Print the start of the original (unhooked) function with `u kernelbase!MapViewOfFileEx L1`
+* Print the start of the original (unhooked) function with `u kernelbase!MapViewOfFileEx L3`
 * Print the mem protection with `!vprot kernelbase!MapViewOfFileEx`, should be RX
 * Execute the injector `.\ThreadlessInject.exe -p (Get-Process "Notepad").id -d kernelbase.dll -e MapViewOfFileEx`
 * Print the mem protection again with `!vprot kernelbase!MapViewOfFileEx`, **should STILL be RX**
