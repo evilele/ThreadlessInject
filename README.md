@@ -32,4 +32,4 @@ From my Bsides Cymru 2023 talk: **[Needles Without the Thread](https://pretalx.c
 - [ ] Use patchless hooking via debugger attachment and hardware breakpoints [(https://www.pentestpartners.com/security-blog/patchless-amsi-bypass-using-sharpblock)](https://www.pentestpartners.com/security-blog/patchless-amsi-bypass-using-sharpblock/).
 - [x] Avoid RWX on hooked function.  Hook assembly will need to handle VirtualProtect calls.
 - [x] Support any DLL via remote module enumeration.
-- [ ] Avoid the `call payload` to fully bypass CFG (this would require the payload to also jmp back to the shellcode loader or patch the payload in the space before the shellcode epilogue)
+- [ ] Avoid the `call payload` to fully bypass CFG (this would require the payload to also jmp back to the shellcode loader or patch the payload in the space before the shellcode epilogue or correctly use push-ret)
